@@ -8,6 +8,8 @@
     - 测试文件名要以 `test_` 开头，后跟被测试的文件名
     - 例如：`test_google_flight_serpapi.py`
 
+安装虚拟环境和依赖请参考Install_venv_and_dependencies.md
+
 如有pull request需要组长通过的请及时通知组长，如无需通过则直接合并。
 
 以下链接是指导如何操作github的：
