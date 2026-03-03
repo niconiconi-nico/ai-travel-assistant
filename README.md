@@ -10,12 +10,13 @@
 
 安装虚拟环境和依赖请参考Install_venv_and_dependencies.md
 
-如有pull request需要组长通过的请及时通知组长，如无需通过则直接合并。
-
 以下链接是指导如何操作github的：
 https://github.com/firstcontributions/first-contributions/blob/main/docs/translations/README.zh-cn.md
 
 很多API可以在https://serpapi.com/google-images-api 中获取
+
+**提交文件时不要提交.env中的api_key!!!** 
+请在本地环境变量中配置。
 
 如有其他问题有待补充则后续补充
 
