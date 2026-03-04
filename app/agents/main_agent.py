@@ -1,9 +1,17 @@
 from dotenv import load_dotenv
 import os
+from pathlib import Path
+import sys
+
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.append(str(TOOLS_DIR))
+
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import create_agent
 from tools import travel_planner, get_location_info, calculate_distance
+from attraction_tool import attraction_information_tool
 load_dotenv()
 
 def build_agent():
@@ -30,14 +38,19 @@ def build_agent():
         )
 
     prompt = (
-        "你是一位专业旅行规划助理，拥有地图查询能力。"
+        "你是一位专业旅行规划助理，拥有地图查询与景点信息检索能力。"
         "当用户提出旅行需求时，请合理调用工具并按以下结构输出："
         "1）行程规划；2）每天安排；3）简要预算建议。"
         "如果涉及具体地点，可调用地图工具查询坐标或距离，并在回答中补充地理信息。"
+        "如果涉及景点安排，优先调用景点信息工具补充营业时间、门票价格和建议游玩时长。"
     )
 
     # create_agent 是 LangChain 0.2+ 的新工厂方法，返回一个 CompiledStateGraph (LangGraph)
-    agent = create_agent(llm, tools=[travel_planner, get_location_info, calculate_distance], system_prompt=prompt)
+    agent = create_agent(
+        llm,
+        tools=[travel_planner, get_location_info, calculate_distance, attraction_information_tool],
+        system_prompt=prompt,
+    )
     return agent
 
 
