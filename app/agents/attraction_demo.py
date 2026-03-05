@@ -33,8 +33,8 @@ def build_itinerary_with_attraction(attraction_name: str, location: str) -> dict
 def main() -> None:
     load_dotenv()
     payload = build_itinerary_with_attraction(
-        attraction_name="Petronas Twin Towers",
-        location="Kuala Lumpur",
+        attraction_name="The Palace Museum",
+        location="Beijing",
     )
     print(payload)
 
