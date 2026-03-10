@@ -1,9 +1,24 @@
-from langchain.tools import tool
+from importlib import import_module
+from importlib.util import find_spec
 import os
-from langchain_openai import ChatOpenAI
+
+from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
+from langchain_openai import ChatOpenAI
+
+
+def _load_geopy_modules():
+    geopy_spec = find_spec("geopy")
+    if geopy_spec is None:
+        return None, None
+
+    try:
+        geocoders_module = import_module("geopy.geocoders")
+        distance_module = import_module("geopy.distance")
+    except Exception:
+        return None, None
+
+    return getattr(geocoders_module, "Nominatim", None), getattr(distance_module, "geodesic", None)
 
 
 @tool
@@ -13,9 +28,13 @@ def get_location_info(place: str) -> str:
     - 输入：地名（如 "Tokyo Tower" 或 "东京塔"）
     - 输出：详细地址、纬度、经度
     """
+    nominatim_cls, _ = _load_geopy_modules()
+    if nominatim_cls is None:
+        return "地图查询出错：缺少 geopy 依赖，请执行 `pip install -r requirements.txt`。"
+
     try:
         # 使用 Nominatim（OpenStreetMap）不需要 Key，但需要设置 user_agent
-        geolocator = Nominatim(user_agent="ai_travel_agent")
+        geolocator = nominatim_cls(user_agent="ai_travel_agent")
         location = geolocator.geocode(place)
         
         if location:
@@ -33,15 +52,19 @@ def calculate_distance(place_a: str, place_b: str) -> str:
     - 输入：起始地、目的地
     - 输出：距离（km）
     """
+    nominatim_cls, geodesic_func = _load_geopy_modules()
+    if nominatim_cls is None or geodesic_func is None:
+        return "距离计算出错：缺少 geopy 依赖，请执行 `pip install -r requirements.txt`。"
+
     try:
-        geolocator = Nominatim(user_agent="ai_travel_agent")
+        geolocator = nominatim_cls(user_agent="ai_travel_agent")
         loc_a = geolocator.geocode(place_a)
         loc_b = geolocator.geocode(place_b)
         
         if loc_a and loc_b:
             coords_a = (loc_a.latitude, loc_a.longitude)
             coords_b = (loc_b.latitude, loc_b.longitude)
-            distance = geodesic(coords_a, coords_b).kilometers
+            distance = geodesic_func(coords_a, coords_b).kilometers
             return f"{place_a} 与 {place_b} 的直线距离约为：{distance:.2f} 公里"
         else:
             return "无法找到其中一个地点的坐标，请检查地名。"
