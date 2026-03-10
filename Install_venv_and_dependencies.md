@@ -9,3 +9,9 @@ python -m venv .venv
 ```bash
 pip install -r requirements.txt
 ```
+
+
+更新代码后（例如执行 `git pull`）如有新增依赖，请重新执行：
+```bash
+pip install -r requirements.txt
+```
