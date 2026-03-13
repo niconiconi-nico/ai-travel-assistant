@@ -2,6 +2,9 @@ import json
 import os
 import re
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,19 @@ _PLATFORM_PRIORITIES = {
     "kkday": 65,
     "ctrip": 65,
     "other": 20,
+}
+
+_FIXED_EXCHANGE_RATES: dict[str, float] = {
+    "MYR": 1.0,
+    "RM": 1.0,
+    "CNY": 0.65,
+    "RMB": 0.65,
+    "USD": 4.70,
+    "EUR": 5.10,
+    "SGD": 3.50,
+    "JPY": 0.031,
+    "GBP": 6.00,
+    "¥": 0.031,
 }
 
 
@@ -165,21 +181,10 @@ def _detect_attraction_type(name: str, text: str = "") -> str:
     return "generic"
 
 
-def estimate_ticket_price(attraction_name: str, context_text: str = "") -> str:
-    attraction_type = _detect_attraction_type(attraction_name, context_text)
-    estimates = {
-        "museum": "RM 20–RM 50 (estimated)",
-        "theme_park": "RM 150+ (estimated)",
-        "tower": "RM 40–RM 120 (estimated)",
-        "temple": "RM 0–RM 20 (estimated)",
-        "park": "RM 0–RM 10 (estimated)",
-        "palace_historic": "RM 20–RM 80 (estimated)",
-        "monument": "RM 10–RM 40 (estimated)",
-        "zoo_aquarium": "RM 30–RM 120 (estimated)",
-        "shopping_old_town": "RM 0–RM 50 (estimated)",
-        "generic": "RM 20–RM 80 (estimated)",
-    }
-    return estimates.get(attraction_type, estimates["generic"])
+def estimate_ticket_price(attraction_name: str, context_text: str = "") -> str | None:
+    _ = attraction_name
+    _ = context_text
+    return None
 
 
 def estimate_visit_duration(attraction_name: str, context_text: str = "") -> str:
@@ -203,134 +208,164 @@ def _extract_numbers(value: str) -> list[float]:
     return [float(n.replace(",", "")) for n in nums]
 
 
-def _to_myr(value: float, currency: str) -> int:
-    currency = currency.upper()
-    if currency in {"RM", "MYR"}:
-        return int(round(value))
-    if currency in {"USD"}:
-        return int(round(value * 4.7))
-    if currency in {"CNY", "RMB", "¥"}:
-        return int(round(value * 0.65))
-    return int(round(value))
+def convert_to_myr(amount: float, currency: str) -> float | None:
+    normalized_currency = currency.upper().strip()
+    rate = _FIXED_EXCHANGE_RATES.get(normalized_currency)
+    if rate is None:
+        return None
+    return round(float(amount) * rate, 2)
 
 
-def _detect_currency(value: str) -> str:
+def _format_myr_amount(amount: float) -> str:
+    return f"RM {amount:.2f}"
+
+
+def _normalize_currency(value: str) -> str:
     upper = value.upper()
-    if "MYR" in upper:
+    if "MYR" in upper or re.search(r"\bRM\b", upper):
         return "MYR"
-    if re.search(r"\bRM\b", upper):
-        return "RM"
     if "USD" in upper:
         return "USD"
     if "CNY" in upper or "RMB" in upper:
         return "CNY"
+    if "EUR" in upper:
+        return "EUR"
+    if "SGD" in upper:
+        return "SGD"
+    if "JPY" in upper:
+        return "JPY"
+    if "GBP" in upper:
+        return "GBP"
     if "¥" in value:
-        return "¥"
+        return "JPY"
     return ""
 
 
-def _normalize_price_to_myr(value: str) -> str:
-    if not value:
-        return ""
-    if value.lower() == "free":
-        return "Free"
-
-    currency = _detect_currency(value)
-    numbers = _extract_numbers(value)
-    if not currency or not numbers:
-        return ""
-
-    if currency in {"RM", "MYR"}:
-        if len(numbers) >= 2 and re.search(r"-|–|to|~|～", value):
-            return f"RM {int(round(numbers[0]))}–RM {int(round(numbers[1]))}"
-        if any(k in value.lower() for k in ["from", "starting", "adult", "起价", "起", "成人票"]):
-            return f"From RM {int(round(numbers[0]))}"
-        return f"RM {int(round(numbers[0]))}"
-
-    converted = [_to_myr(num, currency) for num in numbers[:2]]
-    if len(converted) >= 2 and re.search(r"-|–|to|~|～", value):
-        return f"RM {converted[0]}–RM {converted[1]} (estimated)"
-    return f"RM {converted[0]} (estimated)"
+def _is_reliable_source_type(source_type: str) -> bool:
+    return source_type in {"official", "government"}
 
 
+def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    converted: list[dict[str, Any]] = []
+    for candidate in price_candidates:
+        amount = candidate.get("value")
+        currency = _normalize_currency(_normalize_text(candidate.get("currency")))
+        source_type = _normalize_text(candidate.get("source_type")).lower() or "third_party"
+        url = _normalize_text(candidate.get("url"))
+        if amount is None or not currency:
+            continue
+        try:
+            numeric_amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+
+        myr_value = convert_to_myr(numeric_amount, currency)
+        if myr_value is None:
+            continue
+
+        converted.append(
+            {
+                "value_myr": round(myr_value, 2),
+                "source_type": source_type,
+                "url": url,
+            }
+        )
+
+    reliable_values = sorted(
+        item["value_myr"] for item in converted if _is_reliable_source_type(item["source_type"])
+    )
+    if reliable_values:
+        unique_values = sorted({round(v, 2) for v in reliable_values})
+        if len(unique_values) == 1:
+            return {
+                "ticket_price": _format_myr_amount(unique_values[0]),
+                "price_type": "exact",
+                "price_note": "Official or government source",
+            }
+        return {
+            "ticket_price": f"RM {unique_values[0]:.2f}-{unique_values[-1]:.2f}",
+            "price_type": "range",
+            "price_note": "Conflicting official/government prices",
+        }
+
+    third_party_values = sorted(item["value_myr"] for item in converted if item["source_type"] == "third_party")
+    unique_third_party = sorted({round(v, 2) for v in third_party_values})
+    if len(unique_third_party) > 1:
+        return {
+            "ticket_price": f"RM {unique_third_party[0]:.2f}-{unique_third_party[-1]:.2f}",
+            "price_type": "range",
+            "price_note": "Range derived from multiple non-official sources",
+        }
+
+    return {
+        "ticket_price": None,
+        "price_type": "unknown",
+        "price_note": "Official price not found.",
+    }
 
 
-def is_valid_ticket_price(text: str) -> bool:
-    return _is_valid_price_text(text)
+def _extract_price_candidates(text: str, source_type: str, url: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    patterns = [*_EXACT_PRICE_PATTERNS, *_FROM_PRICE_PATTERNS, *_RANGE_PRICE_PATTERNS]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            value = match.group(0).strip()
+            currency = _normalize_currency(value)
+            numbers = _extract_numbers(value)
+            if not currency or not numbers:
+                continue
+            for number in numbers[:2]:
+                candidates.append(
+                    {
+                        "value": number,
+                        "currency": currency,
+                        "source_type": source_type,
+                        "url": url,
+                    }
+                )
+    return candidates
+
+
+def _infer_source_type(link: str) -> str:
+    lowered = link.lower()
+    if ".gov" in lowered or "tourism" in lowered and ".gov" in lowered:
+        return "government"
+    if any(token in lowered for token in ["official", "visit", "tickets", "admission"]):
+        return "official"
+    return "third_party"
+
+
+def extract_ticket_price(text: str, attraction_name: str = "") -> dict[str, Any]:
+    _ = attraction_name
+    normalized = re.sub(r"https?://\S+", " ", text)
+    normalized = re.sub(r"[?&](?:q|ved|sa|usg|ei|oq|aqs)=[^\s]+", " ", normalized, flags=re.IGNORECASE)
+    candidates = _extract_price_candidates(normalized, source_type="third_party", url="")
+    return resolve_ticket_price(candidates)
 
 
 def convert_price_to_myr(text: str) -> str:
-    return _normalize_price_to_myr(text)
+    candidates = _extract_price_candidates(text, source_type="third_party", url="")
+    resolved = resolve_ticket_price(candidates)
+    return _normalize_text(resolved.get("ticket_price"))
 
 
 def normalize_ticket_price(text: str) -> str:
-    return _normalize_price_to_myr(text)
+    return convert_price_to_myr(text)
 
 
 def _is_valid_price_text(value: str) -> bool:
     if not value:
         return False
     value = value.strip()
-    if len(value) < 6 or len(value) > 50:
+    if len(value) < 6 or len(value) > 80:
         return False
     if re.search(r"[?&](?:q|ved|sa)=", value, re.IGNORECASE):
         return False
     if not re.search(r"\d", value):
         return False
 
-    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bCNY\b|\bRMB\b|¥)", value, re.IGNORECASE)
-    if not has_currency:
-        return False
-
-    # 显式过滤错误样本 rM7 / RM7
-    if re.fullmatch(r"(?i)rm\d{1,3}", value.strip()):
-        return False
-
-    # 货币代码后必须有空格（避免粘连乱码）
-    if re.search(r"(?i)\b(?:RM|MYR|USD|CNY|RMB)\d", value):
-        return False
-
-    return True
-
-
-def extract_ticket_price(text: str, attraction_name: str = "") -> str:
-    normalized = re.sub(r"https?://\S+", " ", text)
-    normalized = re.sub(r"[?&](?:q|ved|sa|usg|ei|oq|aqs)=[^\s]+", " ", normalized, flags=re.IGNORECASE)
-
-    # 1) 精确价格
-    for pattern in _EXACT_PRICE_PATTERNS:
-        for match in re.finditer(pattern, normalized, re.IGNORECASE):
-            candidate = match.group(0).strip()
-            if is_valid_ticket_price(candidate):
-                normalized_price = normalize_ticket_price(candidate)
-                if normalized_price:
-                    return normalized_price
-
-    # 2) 起价
-    for pattern in _FROM_PRICE_PATTERNS:
-        for match in re.finditer(pattern, normalized, re.IGNORECASE):
-            candidate = match.group(0).strip()
-            if is_valid_ticket_price(candidate):
-                normalized_price = normalize_ticket_price(candidate)
-                if normalized_price:
-                    return normalized_price
-
-    # 3) 区间
-    for pattern in _RANGE_PRICE_PATTERNS:
-        for match in re.finditer(pattern, normalized, re.IGNORECASE):
-            candidate = match.group(0).strip()
-            if is_valid_ticket_price(candidate):
-                normalized_price = normalize_ticket_price(candidate)
-                if normalized_price:
-                    return normalized_price
-
-    # 4) 免费
-    for pattern in _FREE_PRICE_PATTERNS:
-        if re.search(pattern, normalized, re.IGNORECASE):
-            return "Free"
-
-    # 5) 估计价格（统一 MYR）
-    return estimate_ticket_price(attraction_name, text)
+    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bCNY\b|\bRMB\b|\bEUR\b|\bSGD\b|\bJPY\b|\bGBP\b|¥)", value, re.IGNORECASE)
+    return bool(has_currency)
 
 
 def extract_visit_duration(text: str, attraction_name: str = "") -> str:
@@ -371,6 +406,84 @@ def _search_google(query: str, api_key: str, num: int = 10) -> dict[str, Any]:
 def _search_google_images(query: str, api_key: str, num: int = 10) -> dict[str, Any]:
     params = {"engine": "google_images", "q": query, "hl": "en", "num": num, "api_key": api_key}
     return GoogleSearch(params).get_dict()
+
+
+def _http_get_json(url: str, headers: dict[str, str] | None = None, timeout: int = 8) -> dict[str, Any] | list[Any] | None:
+    request = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read().decode("utf-8")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
+        return None
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+
+def fetch_wikipedia_summary(attraction_name: str, location: str | None = None) -> dict[str, str]:
+    query = attraction_name.strip()
+    if location:
+        query = f"{query}, {location.strip()}"
+
+    title = urllib.parse.quote(query.replace(" ", "_"))
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    data = _http_get_json(url, headers={"Accept": "application/json", "User-Agent": "ai-travel-assistant/1.0"})
+
+    if not isinstance(data, dict) and location:
+        fallback_title = urllib.parse.quote(attraction_name.strip().replace(" ", "_"))
+        fallback_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{fallback_title}"
+        data = _http_get_json(
+            fallback_url,
+            headers={"Accept": "application/json", "User-Agent": "ai-travel-assistant/1.0"},
+        )
+
+    if not isinstance(data, dict):
+        return {"description": "", "image_url": "", "source_url": ""}
+
+    page_url = _normalize_text(data.get("content_urls", {}).get("desktop", {}).get("page"))
+    if not page_url:
+        page_url = _normalize_text(data.get("content_urls", {}).get("mobile", {}).get("page"))
+
+    return {
+        "description": _normalize_text(data.get("extract")),
+        "image_url": _normalize_text(data.get("thumbnail", {}).get("source")),
+        "source_url": page_url,
+    }
+
+
+def fetch_nominatim_place(attraction_name: str, location: str | None = None) -> dict[str, Any]:
+    query = f"{attraction_name} {location}".strip() if location else attraction_name.strip()
+    if not query:
+        return {}
+
+    encoded_query = urllib.parse.quote(query)
+    url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
+    data = _http_get_json(url, headers={"User-Agent": "ai-travel-assistant/1.0"})
+    if not isinstance(data, list) or not data:
+        return {}
+    first = data[0] if isinstance(data[0], dict) else {}
+    return {
+        "display_name": _normalize_text(first.get("display_name")),
+        "osm_url": f"https://www.openstreetmap.org/{_normalize_text(first.get('osm_type'))}/{_normalize_text(first.get('osm_id'))}"
+        if first.get("osm_type") and first.get("osm_id")
+        else "",
+    }
+
+
+def _collect_price_candidates_from_sources(sources: list[dict[str, str]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        snippet = _normalize_text(source.get("snippet"))
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        combined = f"{title} {snippet}".strip()
+        if not combined:
+            continue
+        source_type = _infer_source_type(link)
+        candidates.extend(_extract_price_candidates(combined, source_type=source_type, url=link))
+    return candidates
 
 
 def _classify_platform(link: str, title: str = "") -> str:
@@ -497,16 +610,15 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
     return candidates
 
 
-def _is_valid_ticket_price_output(value: str) -> bool:
-    if not value:
-        return False
-    if value == "Free":
+def _is_valid_ticket_price_output(value: Any) -> bool:
+    if value is None:
         return True
-    if "estimated" in value.lower() and value.startswith("RM"):
-        return True
-    if not value.startswith("RM") and not value.startswith("From RM"):
+    text = _normalize_text(value)
+    if not text:
         return False
-    return bool(re.search(r"\d", value))
+    if not text.startswith("RM"):
+        return False
+    return bool(re.fullmatch(r"RM\s\d+(?:\.\d{2})?(?:-\d+(?:\.\d{2})?)?", text))
 
 
 def _is_cache_entry_usable(entry: dict[str, Any]) -> bool:
@@ -524,25 +636,27 @@ def _is_cache_entry_usable(entry: dict[str, Any]) -> bool:
 
 
 def get_attraction_info(attraction_name: str, location: str | None = None) -> dict[str, Any]:
-    api_key = os.getenv("SERPAPI_API_KEY")
+    attraction_name = attraction_name.strip()
     result: dict[str, Any] = {
+        "query_type": "attraction_info",
         "name": attraction_name,
-        "image_url": "",
+        "description": None,
+        "image_url": None,
         "opening_hours": "",
         "visit_duration": "",
-        "ticket_price": "",
+        "ticket_price": None,
+        "price_type": "unknown",
+        "price_note": "Official price not found.",
         "sources": [],
     }
 
-    if not attraction_name.strip() or not api_key:
-        if not attraction_name.strip():
-            result["name"] = ""
+    if not attraction_name:
+        result["name"] = ""
         result["visit_duration"] = estimate_visit_duration(attraction_name)
-        result["ticket_price"] = estimate_ticket_price(attraction_name)
         return result
 
     location_suffix = f" {location}" if location else ""
-    cache_key = f"{attraction_name.strip().lower()}::{(location or '').strip().lower()}"
+    cache_key = f"{attraction_name.lower()}::{(location or '').strip().lower()}"
 
     with _CACHE_LOCK:
         cache = _load_cache()
@@ -550,74 +664,87 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
         if cached and _is_cache_entry_usable(cached):
             return cached
 
-    queries = [
-        f"{attraction_name}{location_suffix} opening hours",
-        f"{attraction_name}{location_suffix} ticket price",
-        f"{attraction_name}{location_suffix} admission fee",
-        f"{attraction_name}{location_suffix} entry fee",
-        f"{attraction_name}{location_suffix} adult ticket",
-        f"{attraction_name}{location_suffix} official ticket",
-        f"{attraction_name}{location_suffix} 门票",
-        f"{attraction_name}{location_suffix} 票价",
-        f"{attraction_name}{location_suffix} 成人票",
-        f"{attraction_name}{location_suffix} 多少钱",
-        f"{attraction_name}{location_suffix} how long to spend",
-        f"{attraction_name}{location_suffix} visit duration",
-        f"{attraction_name}{location_suffix} official website",
-    ]
+    wiki_summary = fetch_wikipedia_summary(attraction_name=attraction_name, location=location)
+    result["description"] = wiki_summary.get("description") or None
+    result["image_url"] = wiki_summary.get("image_url") or None
 
+    nominatim_result = fetch_nominatim_place(attraction_name=attraction_name, location=location)
+
+    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    preferred_sources: list[dict[str, str]] = []
     all_organic: list[dict[str, Any]] = []
-    text_blobs: list[str] = []
-
-    for query in queries:
-        try:
-            data = _search_google(query, api_key)
-        except Exception:
-            continue
-
-        organic = data.get("organic_results", [])
-        all_organic.extend(organic)
-
-        text_blobs.extend(
-            [
-                _normalize_text(data.get("knowledge_graph")),
-                _normalize_text(data.get("answer_box")),
-                _normalize_text(data.get("local_results")),
-                _normalize_text(data.get("sports_results")),
-            ]
-        )
-        for item in organic[:8]:
-            text_blobs.append(_normalize_text(item.get("title")))
-            text_blobs.append(_normalize_text(item.get("snippet")))
-
     image_data: dict[str, Any] = {}
-    try:
-        image_data = _search_google_images(f"{attraction_name}{location_suffix}", api_key)
-    except Exception:
-        image_data = {}
 
-    preferred_sources = collect_preferred_sources(all_organic, min_count=3)
-    source_text = "\n".join(
-        f"{s.get('title', '')}\n{s.get('snippet', '')}\n{s.get('link', '')}" for s in preferred_sources
-    )
-    merged_text = "\n".join(t for t in [*text_blobs, source_text] if t)
+    if api_key:
+        queries = [
+            f"{attraction_name}{location_suffix} opening hours",
+            f"{attraction_name}{location_suffix} official ticket",
+            f"{attraction_name}{location_suffix} admission fee",
+            f"{attraction_name}{location_suffix} visit duration",
+            f"{attraction_name}{location_suffix} official website",
+        ]
 
-    result["image_url"] = _pick_image_url(all_organic, image_data)
-    result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
-    result["ticket_price"] = extract_ticket_price(merged_text, attraction_name)
-    result["visit_duration"] = extract_visit_duration(merged_text, attraction_name)
+        text_blobs: list[str] = []
+        for query in queries:
+            try:
+                data = _search_google(query, api_key)
+            except Exception:
+                continue
 
-    sources = preferred_sources
-    if len(sources) < 3:
-        for image in image_data.get("images_results", []):
-            title = _normalize_text(image.get("title"))
-            link = _normalize_text(image.get("link") or image.get("original"))
-            snippet = _normalize_text(image.get("source"))
-            if title or link:
-                sources.append({"title": title, "link": link, "snippet": snippet})
-            if len(sources) >= 3:
-                break
-    result["sources"] = sources[:6]
+            organic = data.get("organic_results", [])
+            all_organic.extend(organic)
+
+            text_blobs.extend(
+                [
+                    _normalize_text(data.get("knowledge_graph")),
+                    _normalize_text(data.get("answer_box")),
+                    _normalize_text(data.get("local_results")),
+                ]
+            )
+            for item in organic[:8]:
+                text_blobs.append(_normalize_text(item.get("title")))
+                text_blobs.append(_normalize_text(item.get("snippet")))
+
+        preferred_sources = collect_preferred_sources(all_organic, min_count=3)
+        source_text = "\n".join(
+            f"{s.get('title', '')}\n{s.get('snippet', '')}\n{s.get('link', '')}" for s in preferred_sources
+        )
+        merged_text = "\n".join(t for t in [*text_blobs, source_text] if t)
+
+        result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
+        result["visit_duration"] = extract_visit_duration(merged_text, attraction_name)
+
+        if not result["image_url"]:
+            try:
+                image_data = _search_google_images(f"{attraction_name}{location_suffix}", api_key)
+            except Exception:
+                image_data = {}
+            result["image_url"] = _pick_image_url(all_organic, image_data) or None
+    else:
+        result["visit_duration"] = estimate_visit_duration(attraction_name)
+
+    price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+    price_resolution = resolve_ticket_price(price_candidates)
+    result.update(price_resolution)
+
+    source_urls: list[str] = []
+    if wiki_summary.get("source_url"):
+        source_urls.append(wiki_summary["source_url"])
+    if nominatim_result.get("osm_url"):
+        source_urls.append(nominatim_result["osm_url"])
+    for source in preferred_sources:
+        link = _normalize_text(source.get("link"))
+        if link:
+            source_urls.append(link)
+
+    deduped_sources: list[str] = []
+    seen: set[str] = set()
+    for url in source_urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped_sources.append(url)
+    result["sources"] = deduped_sources[:6]
 
     with _CACHE_LOCK:
         cache = _load_cache()
