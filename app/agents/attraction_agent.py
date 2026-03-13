@@ -1,11 +1,11 @@
-"""LangChain 子 Agent：处理景点推荐与景点详情查询。"""
+"""LangChain Attraction sub-agent for recommendations and attraction details."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
-import argparse
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from attraction_tool import get_attraction_info, get_attractions_by_place  # noq
 
 @tool
 def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str, Any]:
-    """根据城市返回景点候选列表。"""
+    """Return attraction candidates by city."""
     attractions = get_attractions_by_place(place=city, query_type=query_hint or None)
     return {
         "city": city,
@@ -38,12 +38,12 @@ def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str,
 
 @tool
 def attraction_detail_tool(attraction_name: str, location: str = "") -> dict[str, Any]:
-    """根据景点名（可选城市）返回景点详细信息。"""
+    """Return attraction details by attraction name and optional location."""
     return get_attraction_info(attraction_name=attraction_name, location=location or None)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
-    """从模型文本中提取 JSON 对象。"""
+    """Extract a JSON object from model text."""
     text = (text or "").strip()
     if not text:
         return {}
@@ -65,6 +65,48 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("output_text") or ""
+                if text:
+                    chunks.append(str(text))
+        return "\n".join(chunks).strip()
+
+    if isinstance(content, dict):
+        text = content.get("text") or content.get("output_text") or ""
+        if text:
+            return str(text).strip()
+
+    return str(content or "").strip()
+
+
+def _extract_payload_from_output(output: Any) -> dict[str, Any]:
+    text = _content_to_text(output)
+    if not text:
+        return {}
+
+    # Support fenced JSON like ```json {...}``` from model output.
+    if "```" in text:
+        lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+
+    payload = _extract_json_object(text)
+    if payload:
+        return payload
+
+    # If plain text parse fails, try extracting from serialized object content.
+    return _extract_json_object(json.dumps(output, ensure_ascii=False))
 
 
 def _normalize_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,11 +164,43 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_executor() -> Any:
+def _is_placeholder_api_key(value: str) -> bool:
+    normalized = value.strip()
+    if not normalized:
+        return True
+
+    upper_value = normalized.upper()
+    return upper_value.startswith("YOUR_") or "PLACEHOLDER" in upper_value
+
+
+def _resolve_google_api_key() -> str:
     load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("Missing GEMINI_API_KEY. Please set it in environment or .env before running.")
+
+    gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    google_api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+
+    gemini_valid = not _is_placeholder_api_key(gemini_api_key)
+    google_valid = not _is_placeholder_api_key(google_api_key)
+
+    if gemini_valid:
+        resolved_key = gemini_api_key
+    elif google_valid:
+        resolved_key = google_api_key
+    else:
+        raise ValueError(
+            "Missing a valid Google/Gemini API key. Set GEMINI_API_KEY or GOOGLE_API_KEY "
+            "in your environment or .env, and replace placeholder values like "
+            "'YOUR_GOOGLE_API_KEY'."
+        )
+
+    # The Google client prefers GOOGLE_API_KEY when both are present, so keep them aligned.
+    os.environ["GEMINI_API_KEY"] = resolved_key
+    os.environ["GOOGLE_API_KEY"] = resolved_key
+    return resolved_key
+
+
+def _build_executor() -> Any:
+    api_key = _resolve_google_api_key()
 
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
@@ -136,26 +210,26 @@ def _build_executor() -> Any:
 
     tools = [attraction_recommendation_tool, attraction_detail_tool]
     system_prompt = (
-        "你是 Attraction 子 Agent。你的职责是根据自然语言 query 在两类任务中做判断并调用工具："
-        "1) attraction_recommendation（按城市推荐景点）；"
-        "2) attraction_info（查询单个景点详情）。"
-        "\n输出必须是严格 JSON 对象，不要 markdown，不要额外说明。"
-        "\n推荐类输出格式："
-        "{\"query_type\":\"attraction_recommendation\",\"city\":\"string\",\"attractions\":[{\"name\":\"string\"}],\"sources\":[]}"
-        "\n详情类输出格式："
-        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"sources\":[]}"
-        "\n必须尽量调用工具获取信息，且所有字段都要存在。"
+        "You are the Attraction sub-agent. Classify each query into one of two tasks and use tools.\n"
+        "1) attraction_recommendation: recommend attractions for a city.\n"
+        "2) attraction_info: fetch details for one attraction.\n"
+        "Output must be a strict JSON object only, with no markdown and no extra commentary.\n"
+        "Recommendation JSON schema:\n"
+        "{\"query_type\":\"attraction_recommendation\",\"city\":\"string\",\"attractions\":[{\"name\":\"string\"}],\"sources\":[]}\n"
+        "Info JSON schema:\n"
+        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"sources\":[]}\n"
+        "Use tools whenever possible and keep all fields present."
     )
     return create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 
 
 def run_attraction_agent(query: str) -> dict[str, Any]:
-    """Attraction 子 Agent 统一入口。"""
+    """Attraction sub-agent entrypoint."""
     executor = _build_executor()
     result = executor.invoke({"messages": [("user", query)]})
     messages = result.get("messages", []) if isinstance(result, dict) else []
     output = messages[-1].content if messages else ""
-    payload = _extract_json_object(output if isinstance(output, str) else json.dumps(output, ensure_ascii=False))
+    payload = _extract_payload_from_output(output)
 
     query_type = str(payload.get("query_type", "")).strip()
     if query_type == "attraction_recommendation":
@@ -174,7 +248,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "query",
         type=str,
         nargs="?",
-        help="Natural language query, e.g. '北京有什么好玩的景点'",
+        help="Natural language query, e.g. 'Top attractions in Beijing'",
     )
     return parser
 
@@ -183,8 +257,8 @@ if __name__ == "__main__":
     parser = _build_cli_parser()
     args = parser.parse_args()
     if not args.query:
-        parser.error("query is required. Example: python -m app.agents.attraction_agent 'Batu Caves 门票价格'")
+        parser.error("query is required. Example: python -m app.agents.attraction_agent 'Batu Caves ticket price'")
 
     response = run_attraction_agent(args.query)
-    # 只输出 JSON，便于主 Agent 或脚本直接消费。
+    # Print JSON only so it can be consumed by parent agents/scripts directly.
     print(json.dumps(response, ensure_ascii=False, indent=2))
