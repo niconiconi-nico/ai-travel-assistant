@@ -296,6 +296,12 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
             "price_type": "range",
             "price_note": "Range derived from multiple non-official sources",
         }
+    if len(unique_third_party) == 1:
+        return {
+            "ticket_price": _format_myr_amount(unique_third_party[0]),
+            "price_type": "exact",
+            "price_note": "Single non-official source",
+        }
 
     return {
         "ticket_price": None,

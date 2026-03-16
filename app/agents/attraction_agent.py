@@ -43,16 +43,26 @@ def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str,
     }
 
 
+@tool
+def attraction_detail_tool(attraction_name: str, location: str = "") -> dict[str, Any]:
+    """Return attraction details by attraction name and optional location."""
+    return get_attraction_info(attraction_name=attraction_name, location=location or None)
+
+
 def _normalize_city(text: str) -> str:
     query = str(text or "").strip()
     if not query:
         return ""
 
+    normalized = query.lower()
+    if "george town" in normalized or "乔治城" in query or "喬治城" in query:
+        return "George Town, Penang, Malaysia"
+
     patterns = [
-        r"top attractions in\s+([A-Za-z\s\-]+)",
-        r"attractions in\s+([A-Za-z\s\-]+)",
-        r"([A-Za-z\s\-]+)\s+attractions",
-        r"([\u4e00-\u9fffA-Za-z\s\-]+?)\s*(?:有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点)",
+        r"top attractions in\s+([A-Za-z\s\-,'\.]+)",
+        r"attractions in\s+([A-Za-z\s\-,'\.]+)",
+        r"([A-Za-z\s\-,'\.]+)\s+attractions",
+        r"([\u4e00-\u9fffA-Za-z\s\-,'\.]+?)\s*(?:有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点)",
     ]
 
     for pattern in patterns:
@@ -60,7 +70,12 @@ def _normalize_city(text: str) -> str:
         if match:
             return match.group(1).strip(" .,!，。")
 
-    cleaned = re.sub(r"(有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点|attractions?)", "", query, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点|attractions?|things to do|top attractions in)",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    )
     return cleaned.strip(" .,!，。")
 
 
@@ -81,6 +96,33 @@ def _is_recommendation_query(query: str) -> bool:
     return any(token in query for token in ["景点", "好玩", "值得去"])
 
 
+def _extract_detail_target(query: str) -> tuple[str, str]:
+    text = str(query or "").strip()
+    if not text:
+        return "", ""
+
+    location_hint = ""
+    lowered = text.lower()
+    if "penang" in lowered or "槟城" in text or "檳城" in text:
+        location_hint = "Penang, Malaysia"
+    elif "beijing" in lowered or "北京" in text:
+        location_hint = "Beijing"
+
+    cleaned = re.sub(
+        r"(门票多少钱|門票多少錢|ticket\s*price|admission\s*fee|how much|开放时间|開放時間|opening\s*hours|营业时间|營業時間|visit duration|游玩时长|建議游玩时长)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[?？,，。!]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if " " in cleaned and any(word in cleaned.lower() for word in ["ticket", "opening", "hours", "price"]):
+        cleaned = cleaned.split(" ")[0].strip()
+
+    return cleaned or text, location_hint
+
+
 def _clean_ticket_price(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -93,7 +135,7 @@ def _clean_ticket_price(value: Any) -> str:
 
     if not re.search(r"\bRM\b", text):
         return ""
-    return text
+    return text.replace("--", "-")
 
 
 def _compact_description(text: Any) -> str:
@@ -101,7 +143,7 @@ def _compact_description(text: Any) -> str:
     if not content:
         return ""
     content = re.sub(r"\s+", " ", content)
-    return content[:180].rstrip()
+    return content[:220].rstrip()
 
 
 def _normalize_opening_hours(value: Any) -> str:
@@ -114,105 +156,173 @@ def _normalize_opening_hours(value: Any) -> str:
     return ""
 
 
-def _search_city_candidates(city: str, api_key: str, limit: int = 8) -> list[dict[str, str]]:
+def _clean_candidate_name(name: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return ""
+
+    text = re.split(r"\s[-|–:]\s", text)[0].strip()
+    text = re.sub(r"^(在鄰近地區|在邻近地区|附近|nearby)[:：\s]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\d+\s*", "", text)
+
+    blocked_patterns = [
+        r"\d+\s*[大个個]?\s*景点",
+        r"必做事项",
+        r"things to do",
+        r"ultimate guide",
+        r"终极指南|終極指南",
+        r"旅遊攻略|旅游攻略|攻略",
+        r"游览观光|遊覽觀光",
+        r"top\s*\d+",
+        r"best attractions",
+        r"景点玩乐|景點玩樂",
+        r"washington|華盛頓",
+    ]
+    lowered = text.lower()
+    if any(re.search(pat, lowered, re.IGNORECASE) for pat in blocked_patterns):
+        return ""
+
+    if len(text) < 3:
+        return ""
+    return text
+
+
+def _search_city_candidates(city: str, api_key: str, limit: int = 10) -> list[dict[str, str]]:
     if not city or not api_key:
         return []
 
-    params = {
-        "engine": "google",
-        "q": f"top attractions in {city}",
-        "hl": "en",
-        "num": max(limit, 8),
-        "api_key": api_key,
-    }
-    try:
-        payload = GoogleSearch(params).get_dict()
-    except Exception:
-        return []
+    query_city = city
+    if "george town" in city.lower():
+        query_city = "George Town Penang Malaysia"
+
+    queries = [
+        f"top attractions in {query_city}",
+        f"must visit attractions in {query_city}",
+    ]
 
     candidates: list[dict[str, str]] = []
     seen: set[str] = set()
-    for item in payload.get("organic_results", [])[:12]:
-        title = str(item.get("title", "")).strip()
-        link = str(item.get("link", "")).strip()
-        snippet = str(item.get("snippet", "")).strip()
-        if not title:
+
+    for q in queries:
+        params = {
+            "engine": "google",
+            "q": q,
+            "hl": "en",
+            "num": 12,
+            "api_key": api_key,
+        }
+        try:
+            payload = GoogleSearch(params).get_dict()
+        except Exception:
             continue
 
-        name = re.split(r"\s[-|–:]\s", title)[0].strip()
-        if len(name) < 3:
-            continue
-        lowered = name.lower()
-        if any(bad in lowered for bad in ["things to do", "best attractions", "tripadvisor", "wikipedia"]):
-            continue
-        if lowered in seen:
-            continue
-        seen.add(lowered)
+        for item in payload.get("organic_results", [])[:12]:
+            title = str(item.get("title", "")).strip()
+            link = str(item.get("link", "")).strip()
+            snippet = str(item.get("snippet", "")).strip()
 
-        candidates.append({"name": name, "brief_description": snippet, "source_link": link})
-        if len(candidates) >= limit:
-            break
+            name = _clean_candidate_name(title)
+            if not name:
+                # try to extract from snippet-like "Visit Penang Hill"
+                snippet_name_match = re.search(r"(?:visit|explore|see)\s+([A-Z][A-Za-z\s\-]{2,50})", snippet)
+                if snippet_name_match:
+                    name = _clean_candidate_name(snippet_name_match.group(1).strip())
+            if not name:
+                continue
+
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            candidates.append({"name": name, "brief_description": snippet, "source_link": link})
+            if len(candidates) >= limit:
+                return candidates
+
     return candidates
+
+
+def _fallback_seed_attractions(city: str) -> list[str]:
+    if "george town" in city.lower() or "penang" in city.lower():
+        return [
+            "Penang Hill",
+            "Chew Jetty",
+            "Kek Lok Si Temple",
+            "Armenian Street",
+            "Pinang Peranakan Mansion",
+        ]
+    return []
 
 
 def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
     candidates = get_attractions_by_place(place=city, query_type=query)
     api_key = os.getenv("SERPAPI_API_KEY", "").strip()
-    if len(candidates) < 3:
-        fallback = _search_city_candidates(city=city, api_key=api_key, limit=10)
-        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
-        for item in fallback:
-            key = item.get("name", "").strip().lower()
-            if key and key not in existing:
-                candidates.append(item)
-                existing.add(key)
 
-    attractions: list[dict[str, str]] = []
-    sources: list[str] = []
+    normalized_candidates: list[dict[str, str]] = []
     seen_names: set[str] = set()
-
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name", "")).strip()
-        if not name:
+        cleaned_name = _clean_candidate_name(item.get("name", ""))
+        if not cleaned_name:
             continue
-        key = name.lower()
+        key = cleaned_name.lower()
         if key in seen_names:
             continue
         seen_names.add(key)
+        normalized_candidates.append(
+            {
+                "name": cleaned_name,
+                "brief_description": str(item.get("brief_description", "")).strip(),
+                "source_link": str(item.get("source_link", "")).strip(),
+            }
+        )
+
+    if len(normalized_candidates) < 3:
+        fallback = _search_city_candidates(city=city, api_key=api_key, limit=12)
+        for item in fallback:
+            key = item.get("name", "").strip().lower()
+            if key and key not in seen_names:
+                normalized_candidates.append(item)
+                seen_names.add(key)
+
+    if len(normalized_candidates) < 3:
+        for seeded in _fallback_seed_attractions(city):
+            key = seeded.lower()
+            if key not in seen_names:
+                normalized_candidates.append({"name": seeded, "brief_description": "", "source_link": ""})
+                seen_names.add(key)
+
+    attractions: list[dict[str, str]] = []
+    sources: list[str] = []
+
+    for item in normalized_candidates:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
 
         detail = get_attraction_info(attraction_name=name, location=city)
         detail_sources = detail.get("sources", []) if isinstance(detail, dict) else []
         if isinstance(detail_sources, list):
             for src in detail_sources:
-                url = str(src or "").strip()
-                if url:
-                    sources.append(url)
+                src_text = str(src or "").strip()
+                if src_text:
+                    sources.append(src_text)
 
         description = _compact_description(detail.get("description")) or _compact_description(item.get("brief_description"))
         image = str(detail.get("image_url") or detail.get("image") or "").strip()
         ticket_price = _clean_ticket_price(detail.get("ticket_price"))
 
-        enriched = {
-            "name": name,
-            "description": description,
-            "image": image,
-            "ticket_price": ticket_price,
-        }
-        attractions.append(enriched)
-        if len(attractions) >= 6:
-            break
-
-    if not attractions and city:
         attractions.append(
             {
-                "name": city,
-                "description": f"Popular attractions in {city}.",
-                "image": "",
-                "ticket_price": "",
+                "name": name,
+                "description": description,
+                "image": image,
+                "ticket_price": ticket_price,
             }
         )
+        if len(attractions) >= 6:
+            break
 
     deduped_sources: list[str] = []
     seen_source: set[str] = set()
@@ -228,12 +338,6 @@ def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
         "attractions": attractions,
         "sources": deduped_sources[:10],
     }
-
-
-@tool
-def attraction_detail_tool(attraction_name: str, location: str = "") -> dict[str, Any]:
-    """Return attraction details by attraction name and optional location."""
-    return get_attraction_info(attraction_name=attraction_name, location=location or None)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -290,7 +394,6 @@ def _extract_payload_from_output(output: Any) -> dict[str, Any]:
     if not text:
         return {}
 
-    # Support fenced JSON like ```json {...}``` from model output.
     if "```" in text:
         lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
@@ -299,7 +402,6 @@ def _extract_payload_from_output(output: Any) -> dict[str, Any]:
     if payload:
         return payload
 
-    # If plain text parse fails, try extracting from serialized object content.
     return _extract_json_object(json.dumps(output, ensure_ascii=False))
 
 
@@ -313,12 +415,14 @@ def _normalize_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
     normalized_attractions: list[dict[str, str]] = []
     for item in raw_attractions:
         if isinstance(item, dict):
-            name = str(item.get("name", "")).strip()
+            raw_name = str(item.get("name", "")).strip()
+            name = _clean_candidate_name(raw_name) or raw_name
             description = _compact_description(item.get("description"))
             image = str(item.get("image") or item.get("image_url") or "").strip()
             ticket_price = _clean_ticket_price(item.get("ticket_price"))
         else:
-            name = str(item).strip()
+            raw_name = str(item).strip()
+            name = _clean_candidate_name(raw_name) or raw_name
             description = ""
             image = ""
             ticket_price = ""
@@ -408,7 +512,6 @@ def _resolve_google_api_key() -> str:
             "'YOUR_GOOGLE_API_KEY'."
         )
 
-    # The Google client prefers GOOGLE_API_KEY when both are present, so keep them aligned.
     os.environ["GEMINI_API_KEY"] = resolved_key
     os.environ["GOOGLE_API_KEY"] = resolved_key
     return resolved_key
@@ -430,12 +533,30 @@ def _build_executor() -> Any:
         "2) attraction_info: fetch details for one attraction.\n"
         "Output must be a strict JSON object only, with no markdown and no extra commentary.\n"
         "Recommendation JSON schema:\n"
-        "{\"query_type\":\"attraction_recommendation\",\"city\":\"string\",\"attractions\":[{\"name\":\"string\"}],\"sources\":[]}\n"
+        "{\"query_type\":\"attraction_recommendation\",\"city\":\"string\",\"attractions\":[{\"name\":\"string\",\"description\":\"string\",\"image\":\"string\",\"ticket_price\":\"string\"}],\"sources\":[]}\n"
         "Info JSON schema:\n"
-        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"sources\":[]}\n"
+        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"description\":\"string\",\"image\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"sources\":[]}\n"
         "Use tools whenever possible and keep all fields present."
     )
     return create_agent(model=llm, tools=tools, system_prompt=system_prompt)
+
+
+def _build_detail_from_query(query: str) -> dict[str, Any]:
+    name, location_hint = _extract_detail_target(query)
+    detail = get_attraction_info(attraction_name=name, location=location_hint or None)
+
+    if not _compact_description(detail.get("description")) or not str(detail.get("image_url") or "").strip():
+        retry = get_attraction_info(attraction_name=name, location=None)
+        if not detail.get("description") and retry.get("description"):
+            detail["description"] = retry.get("description")
+        if not detail.get("image_url") and retry.get("image_url"):
+            detail["image_url"] = retry.get("image_url")
+        if not detail.get("ticket_price") and retry.get("ticket_price"):
+            detail["ticket_price"] = retry.get("ticket_price")
+        if not detail.get("sources") and retry.get("sources"):
+            detail["sources"] = retry.get("sources")
+
+    return _normalize_info(detail)
 
 
 def run_attraction_agent(query: str) -> dict[str, Any]:
@@ -444,6 +565,9 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
         city = _normalize_city(query)
         if city:
             return _build_recommendation_from_city(city=city, query=query)
+
+    if any(token in query.lower() for token in ["ticket", "price", "门票", "開放", "开放", "hours", "营业"]):
+        return _build_detail_from_query(query)
 
     executor = _build_executor()
     result = executor.invoke({"messages": [("user", query)]})
@@ -455,29 +579,28 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
     if query_type == "attraction_recommendation":
         city = _normalize_city(payload.get("city") or query)
         normalized = _normalize_recommendation(payload)
-        if normalized.get("attractions"):
+        if len(normalized.get("attractions", [])) >= 1:
             return normalized
         if city:
             return _build_recommendation_from_city(city=city, query=query)
         return normalized
+
     if query_type == "attraction_info":
         normalized_info = _normalize_info(payload)
         if normalized_info.get("name"):
             return normalized_info
-        detail = get_attraction_info(attraction_name=query, location=None)
-        return _normalize_info(detail)
+        return _build_detail_from_query(query)
 
     if "attractions" in payload or "city" in payload:
         normalized = _normalize_recommendation(payload)
-        if normalized.get("attractions"):
+        if len(normalized.get("attractions", [])) >= 1:
             return normalized
         city = _normalize_city(payload.get("city") or query)
         if city:
             return _build_recommendation_from_city(city=city, query=query)
         return normalized
 
-    detail = get_attraction_info(attraction_name=query, location=None)
-    return _normalize_info(detail)
+    return _build_detail_from_query(query)
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -498,5 +621,4 @@ if __name__ == "__main__":
         parser.error("query is required. Example: python -m app.agents.attraction_agent 'Batu Caves ticket price'")
 
     response = run_attraction_agent(args.query)
-    # Print JSON only so it can be consumed by parent agents/scripts directly.
     print(json.dumps(response, ensure_ascii=False, indent=2))
