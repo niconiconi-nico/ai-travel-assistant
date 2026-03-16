@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,18 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
+from serpapi import GoogleSearch
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from attraction_tool import get_attraction_info, get_attractions_by_place  # noqa: E402
+from attraction_tool import (  # noqa: E402
+    clean_opening_hours,
+    get_attraction_info,
+    get_attractions_by_place,
+    is_valid_opening_hours,
+)
 
 
 @tool
@@ -33,6 +40,193 @@ def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str,
             for item in attractions
             if isinstance(item, dict) and item.get("source_link")
         ],
+    }
+
+
+def _normalize_city(text: str) -> str:
+    query = str(text or "").strip()
+    if not query:
+        return ""
+
+    patterns = [
+        r"top attractions in\s+([A-Za-z\s\-]+)",
+        r"attractions in\s+([A-Za-z\s\-]+)",
+        r"([A-Za-z\s\-]+)\s+attractions",
+        r"([\u4e00-\u9fffA-Za-z\s\-]+?)\s*(?:有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" .,!，。")
+
+    cleaned = re.sub(r"(有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点|attractions?)", "", query, flags=re.IGNORECASE)
+    return cleaned.strip(" .,!，。")
+
+
+def _is_recommendation_query(query: str) -> bool:
+    text = str(query or "").lower()
+    recommendation_tokens = [
+        "有什么好玩的景点",
+        "有什么值得去的景点",
+        "景点推荐",
+        "推荐景点",
+        "top attractions",
+        "things to do",
+        "attractions in",
+        "attractions",
+    ]
+    if any(token in text for token in recommendation_tokens):
+        return True
+    return any(token in query for token in ["景点", "好玩", "值得去"])
+
+
+def _clean_ticket_price(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    blocked = ["estimated", "unknown", "official price not found", "none", "null"]
+    if any(token in lowered for token in blocked):
+        return ""
+
+    if not re.search(r"\bRM\b", text):
+        return ""
+    return text
+
+
+def _compact_description(text: Any) -> str:
+    content = str(text or "").strip()
+    if not content:
+        return ""
+    content = re.sub(r"\s+", " ", content)
+    return content[:180].rstrip()
+
+
+def _normalize_opening_hours(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    cleaned = clean_opening_hours(raw)
+    if cleaned and is_valid_opening_hours(cleaned):
+        return cleaned
+    return ""
+
+
+def _search_city_candidates(city: str, api_key: str, limit: int = 8) -> list[dict[str, str]]:
+    if not city or not api_key:
+        return []
+
+    params = {
+        "engine": "google",
+        "q": f"top attractions in {city}",
+        "hl": "en",
+        "num": max(limit, 8),
+        "api_key": api_key,
+    }
+    try:
+        payload = GoogleSearch(params).get_dict()
+    except Exception:
+        return []
+
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in payload.get("organic_results", [])[:12]:
+        title = str(item.get("title", "")).strip()
+        link = str(item.get("link", "")).strip()
+        snippet = str(item.get("snippet", "")).strip()
+        if not title:
+            continue
+
+        name = re.split(r"\s[-|–:]\s", title)[0].strip()
+        if len(name) < 3:
+            continue
+        lowered = name.lower()
+        if any(bad in lowered for bad in ["things to do", "best attractions", "tripadvisor", "wikipedia"]):
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+
+        candidates.append({"name": name, "brief_description": snippet, "source_link": link})
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
+    candidates = get_attractions_by_place(place=city, query_type=query)
+    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    if len(candidates) < 3:
+        fallback = _search_city_candidates(city=city, api_key=api_key, limit=10)
+        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
+        for item in fallback:
+            key = item.get("name", "").strip().lower()
+            if key and key not in existing:
+                candidates.append(item)
+                existing.add(key)
+
+    attractions: list[dict[str, str]] = []
+    sources: list[str] = []
+    seen_names: set[str] = set()
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+
+        detail = get_attraction_info(attraction_name=name, location=city)
+        detail_sources = detail.get("sources", []) if isinstance(detail, dict) else []
+        if isinstance(detail_sources, list):
+            for src in detail_sources:
+                url = str(src or "").strip()
+                if url:
+                    sources.append(url)
+
+        description = _compact_description(detail.get("description")) or _compact_description(item.get("brief_description"))
+        image = str(detail.get("image_url") or detail.get("image") or "").strip()
+        ticket_price = _clean_ticket_price(detail.get("ticket_price"))
+
+        enriched = {
+            "name": name,
+            "description": description,
+            "image": image,
+            "ticket_price": ticket_price,
+        }
+        attractions.append(enriched)
+        if len(attractions) >= 6:
+            break
+
+    if not attractions and city:
+        attractions.append(
+            {
+                "name": city,
+                "description": f"Popular attractions in {city}.",
+                "image": "",
+                "ticket_price": "",
+            }
+        )
+
+    deduped_sources: list[str] = []
+    seen_source: set[str] = set()
+    for src in sources:
+        if src in seen_source:
+            continue
+        seen_source.add(src)
+        deduped_sources.append(src)
+
+    return {
+        "query_type": "attraction_recommendation",
+        "city": city,
+        "attractions": attractions,
+        "sources": deduped_sources[:10],
     }
 
 
@@ -120,10 +314,23 @@ def _normalize_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
     for item in raw_attractions:
         if isinstance(item, dict):
             name = str(item.get("name", "")).strip()
+            description = _compact_description(item.get("description"))
+            image = str(item.get("image") or item.get("image_url") or "").strip()
+            ticket_price = _clean_ticket_price(item.get("ticket_price"))
         else:
             name = str(item).strip()
+            description = ""
+            image = ""
+            ticket_price = ""
         if name:
-            normalized_attractions.append({"name": name})
+            normalized_attractions.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "image": image,
+                    "ticket_price": ticket_price,
+                }
+            )
 
     raw_sources = payload.get("sources", [])
     if not isinstance(raw_sources, list):
@@ -154,12 +361,20 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
             if text:
                 sources.append(text)
 
+    description = _compact_description(payload.get("description"))
+    image = str(payload.get("image") or payload.get("image_url") or "").strip()
+    opening_hours = _normalize_opening_hours(payload.get("opening_hours"))
+    visit_duration = str(payload.get("visit_duration") or "").strip()
+    ticket_price = _clean_ticket_price(payload.get("ticket_price"))
+
     return {
         "query_type": "attraction_info",
         "name": str(payload.get("name", "")).strip(),
-        "opening_hours": str(payload.get("opening_hours", "")).strip(),
-        "visit_duration": str(payload.get("visit_duration", "")).strip(),
-        "ticket_price": str(payload.get("ticket_price", "")).strip(),
+        "description": description,
+        "image": image,
+        "opening_hours": opening_hours,
+        "visit_duration": visit_duration,
+        "ticket_price": ticket_price,
         "sources": sources,
     }
 
@@ -225,6 +440,11 @@ def _build_executor() -> Any:
 
 def run_attraction_agent(query: str) -> dict[str, Any]:
     """Attraction sub-agent entrypoint."""
+    if _is_recommendation_query(query):
+        city = _normalize_city(query)
+        if city:
+            return _build_recommendation_from_city(city=city, query=query)
+
     executor = _build_executor()
     result = executor.invoke({"messages": [("user", query)]})
     messages = result.get("messages", []) if isinstance(result, dict) else []
@@ -233,13 +453,31 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
 
     query_type = str(payload.get("query_type", "")).strip()
     if query_type == "attraction_recommendation":
-        return _normalize_recommendation(payload)
+        city = _normalize_city(payload.get("city") or query)
+        normalized = _normalize_recommendation(payload)
+        if normalized.get("attractions"):
+            return normalized
+        if city:
+            return _build_recommendation_from_city(city=city, query=query)
+        return normalized
     if query_type == "attraction_info":
-        return _normalize_info(payload)
+        normalized_info = _normalize_info(payload)
+        if normalized_info.get("name"):
+            return normalized_info
+        detail = get_attraction_info(attraction_name=query, location=None)
+        return _normalize_info(detail)
 
     if "attractions" in payload or "city" in payload:
-        return _normalize_recommendation(payload)
-    return _normalize_info(payload)
+        normalized = _normalize_recommendation(payload)
+        if normalized.get("attractions"):
+            return normalized
+        city = _normalize_city(payload.get("city") or query)
+        if city:
+            return _build_recommendation_from_city(city=city, query=query)
+        return normalized
+
+    detail = get_attraction_info(attraction_name=query, location=None)
+    return _normalize_info(detail)
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
