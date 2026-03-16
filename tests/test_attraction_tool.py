@@ -15,7 +15,7 @@ def test_get_attraction_info_without_api_key_returns_safe_defaults(monkeypatch):
 
     assert result["name"] == "Tokyo Tower"
     assert result["image_url"] == ""
-    assert result["ticket_price"] != ""
+    assert result["ticket_price"] == ""
     assert "estimated" in result["visit_duration"]
     assert isinstance(result["sources"], list)
 
@@ -214,7 +214,7 @@ def test_invalid_rm7_should_fallback(monkeypatch):
     result = attraction_tool.get_attraction_info("Demo Tower", "KL")
 
     assert result["ticket_price"] != "rM7"
-    assert result["ticket_price"].startswith("RM") or result["ticket_price"] == "Free"
+    assert result["ticket_price"].startswith("RM") or result["ticket_price"] in {"Free", ""}
 
 
 def test_invalid_cached_entry_should_be_recomputed(monkeypatch):

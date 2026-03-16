@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from serpapi import GoogleSearch
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -129,13 +128,15 @@ def _clean_ticket_price(value: Any) -> str:
         return ""
 
     lowered = text.lower()
-    blocked = ["estimated", "unknown", "official price not found", "none", "null"]
+    blocked = ["estimated", "unknown", "official price not found", "none", "null", "maybe"]
     if any(token in lowered for token in blocked):
         return ""
+    if lowered == "free":
+        return "Free"
 
-    if not re.search(r"\bRM\b", text):
-        return ""
-    return text.replace("--", "-")
+    if re.search(r"\bRM\b", text, re.IGNORECASE):
+        return text.replace("--", "-").replace("MYR", "RM").strip()
+    return ""
 
 
 def _compact_description(text: Any) -> str:
@@ -187,127 +188,39 @@ def _clean_candidate_name(name: str) -> str:
     return text
 
 
-def _search_city_candidates(city: str, api_key: str, limit: int = 10) -> list[dict[str, str]]:
-    if not city or not api_key:
-        return []
-
-    query_city = city
-    if "george town" in city.lower():
-        query_city = "George Town Penang Malaysia"
-
-    queries = [
-        f"top attractions in {query_city}",
-        f"must visit attractions in {query_city}",
-    ]
-
-    candidates: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    for q in queries:
-        params = {
-            "engine": "google",
-            "q": q,
-            "hl": "en",
-            "num": 12,
-            "api_key": api_key,
-        }
-        try:
-            payload = GoogleSearch(params).get_dict()
-        except Exception:
-            continue
-
-        for item in payload.get("organic_results", [])[:12]:
-            title = str(item.get("title", "")).strip()
-            link = str(item.get("link", "")).strip()
-            snippet = str(item.get("snippet", "")).strip()
-
-            name = _clean_candidate_name(title)
-            if not name:
-                # try to extract from snippet-like "Visit Penang Hill"
-                snippet_name_match = re.search(r"(?:visit|explore|see)\s+([A-Z][A-Za-z\s\-]{2,50})", snippet)
-                if snippet_name_match:
-                    name = _clean_candidate_name(snippet_name_match.group(1).strip())
-            if not name:
-                continue
-
-            key = name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-
-            candidates.append({"name": name, "brief_description": snippet, "source_link": link})
-            if len(candidates) >= limit:
-                return candidates
-
-    return candidates
-
-
-def _fallback_seed_attractions(city: str) -> list[str]:
-    if "george town" in city.lower() or "penang" in city.lower():
-        return [
-            "Penang Hill",
-            "Chew Jetty",
-            "Kek Lok Si Temple",
-            "Armenian Street",
-            "Pinang Peranakan Mansion",
-        ]
-    return []
-
-
 def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
     candidates = get_attractions_by_place(place=city, query_type=query)
-    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
 
-    normalized_candidates: list[dict[str, str]] = []
-    seen_names: set[str] = set()
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        cleaned_name = _clean_candidate_name(item.get("name", ""))
-        if not cleaned_name:
-            continue
-        key = cleaned_name.lower()
-        if key in seen_names:
-            continue
-        seen_names.add(key)
-        normalized_candidates.append(
-            {
-                "name": cleaned_name,
-                "brief_description": str(item.get("brief_description", "")).strip(),
-                "source_link": str(item.get("source_link", "")).strip(),
-            }
-        )
-
-    if len(normalized_candidates) < 3:
-        fallback = _search_city_candidates(city=city, api_key=api_key, limit=12)
-        for item in fallback:
-            key = item.get("name", "").strip().lower()
-            if key and key not in seen_names:
-                normalized_candidates.append(item)
-                seen_names.add(key)
-
-    if len(normalized_candidates) < 3:
-        for seeded in _fallback_seed_attractions(city):
-            key = seeded.lower()
-            if key not in seen_names:
-                normalized_candidates.append({"name": seeded, "brief_description": "", "source_link": ""})
-                seen_names.add(key)
+    if len(candidates) < 3 and ("george town" in city.lower() or "penang" in city.lower()):
+        seed_names = ["Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"]
+        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
+        for seed in seed_names:
+            if seed.lower() not in existing:
+                candidates.append({"name": seed, "brief_description": "", "source_link": ""})
+                existing.add(seed.lower())
 
     attractions: list[dict[str, str]] = []
     sources: list[str] = []
+    seen_names: set[str] = set()
 
-    for item in normalized_candidates:
-        name = str(item.get("name", "")).strip()
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_candidate_name(item.get("name", ""))
         if not name:
             continue
+        key = name.lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
 
         detail = get_attraction_info(attraction_name=name, location=city)
         detail_sources = detail.get("sources", []) if isinstance(detail, dict) else []
         if isinstance(detail_sources, list):
             for src in detail_sources:
-                src_text = str(src or "").strip()
-                if src_text:
-                    sources.append(src_text)
+                url = str(src or "").strip()
+                if url:
+                    sources.append(url)
 
         description = _compact_description(detail.get("description")) or _compact_description(item.get("brief_description"))
         image = str(detail.get("image_url") or detail.get("image") or "").strip()
@@ -321,7 +234,7 @@ def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
                 "ticket_price": ticket_price,
             }
         )
-        if len(attractions) >= 6:
+        if len(attractions) >= 8:
             break
 
     deduped_sources: list[str] = []
