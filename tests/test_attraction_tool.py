@@ -357,3 +357,60 @@ def test_price_like_line_should_not_be_opening_hours(monkeypatch):
     assert "Admission" not in result["opening_hours"]
     assert "$" not in result["opening_hours"]
     assert result["ticket_price"].startswith("RM")
+
+
+def test_parse_gemini_ticket_payload_handles_markdown_json():
+    raw = """```json
+{"ticket_price":"$17.47","price_type":"third_party","price_note":"ota page"}
+```"""
+
+    parsed = attraction_tool._parse_gemini_ticket_payload(raw)
+
+    assert parsed["ticket_price"].startswith("RM")
+    assert parsed["price_type"] == "third_party"
+
+
+def test_get_attraction_info_prefers_gemini_ticket_resolution(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "knowledge_graph": {},
+            "answer_box": {},
+            "organic_results": [
+                {
+                    "title": "Official Tickets",
+                    "link": "https://example.com/tickets",
+                    "snippet": "Admission details",
+                },
+                {
+                    "title": "Official FAQ",
+                    "link": "https://example.com/faq",
+                    "snippet": "Ticket info",
+                },
+                {
+                    "title": "Official Site",
+                    "link": "https://example.com",
+                    "snippet": "Visitor info",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+    monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
+    monkeypatch.setattr(attraction_tool, "_fetch_url_text", lambda url, timeout=10: "Adult admission RM 30")
+    monkeypatch.setattr(
+        attraction_tool,
+        "resolve_ticket_price_with_gemini",
+        lambda attraction_name, location, sources, rule_based_price="": {
+            "ticket_price": "RM 30",
+            "price_type": "official",
+            "price_note": "resolved by gemini",
+        },
+    )
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_gemini.json"))
+
+    result = attraction_tool.get_attraction_info("Demo Attraction", "KL")
+
+    assert result["ticket_price"] == "RM 30"
+    assert result["price_type"] == "official"

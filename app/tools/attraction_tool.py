@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
 from serpapi import GoogleSearch
 
 _CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "attraction_cache.json"
@@ -85,7 +86,7 @@ def _contains_price_or_ticket_tokens(text: str) -> bool:
         return False
     return bool(
         re.search(
-            r"\bRM\b|\bMYR\b|\$\s?\d|\bAdult\b|\bChild\b|\bTicket\b|\bAdmission\b|per\s+adult|\bprice\b|门票|票价|收费",
+            r"\bRM\b|\bMYR\b|\$\s?\d|\bAdult\b|\bChild\b|\bTicket\b|\bAdmission\b|per\s+adult|\bprice\b|\bpackage\b|门票|票价|收费",
             value,
             re.IGNORECASE,
         )
@@ -746,6 +747,133 @@ def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_
     return _pick_ticket_price_from_values(all_values)
 
 
+def _resolve_gemini_api_key() -> str:
+    gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    google_api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    return gemini_api_key or google_api_key
+
+
+def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
+
+    cleaned = text
+    if "```" in cleaned:
+        cleaned = "\n".join(line for line in cleaned.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(cleaned[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    ticket_price = _normalize_text(payload.get("ticket_price"))
+    price_type = _normalize_text(payload.get("price_type")).lower() or "unknown"
+    price_note = _normalize_text(payload.get("price_note"))
+
+    if ticket_price and ticket_price != "Free":
+        ticket_price = ticket_price.replace("-", "–")
+        if re.fullmatch(r"\$\s*\d+(?:\.\d{1,2})?", ticket_price):
+            usd_value = float(re.findall(r"\d+(?:\.\d{1,2})?", ticket_price)[0])
+            converted = convert_to_myr(usd_value, "USD")
+            ticket_price = _format_rm_clean(converted) if converted is not None else ""
+        if not _is_valid_ticket_price_output(ticket_price):
+            ticket_price = ""
+
+    if ticket_price == "Free":
+        price_type = "free"
+
+    if price_type not in {"official", "third_party", "free", "range", "unknown"}:
+        price_type = "unknown"
+
+    return {
+        "ticket_price": ticket_price,
+        "price_type": price_type,
+        "price_note": price_note,
+    }
+
+
+def resolve_ticket_price_with_gemini(
+    attraction_name: str,
+    location: str | None,
+    sources: list[dict[str, str]],
+    rule_based_price: str = "",
+) -> dict[str, str]:
+    api_key = _resolve_gemini_api_key()
+    if not api_key or not sources:
+        return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
+
+    ranked_sources: list[tuple[int, dict[str, str], str]] = []
+    for source in sources[:8]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        if not _looks_like_ticket_source(title, link, snippet):
+            continue
+        page_text = _fetch_url_text(link)
+        if not page_text and not snippet:
+            continue
+        ranked_sources.append((_ticket_source_priority(title, link, snippet), source, page_text))
+
+    if not ranked_sources:
+        return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
+
+    ranked_sources.sort(key=lambda x: x[0])
+    source_entries: list[dict[str, str]] = []
+    for priority, source, page_text in ranked_sources[:4]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        source_entries.append(
+            {
+                "source_url": link,
+                "source_type": str(priority),
+                "title": title,
+                "snippet": snippet,
+                "content": page_text[:2200],
+                "rule_candidates": _extract_strong_ticket_values(f"{title}\n{snippet}\n{page_text}", attraction_name=attraction_name),
+            }
+        )
+
+    payload = {
+        "attraction_name": attraction_name,
+        "location": location or "",
+        "rule_based_price": rule_based_price,
+        "sources": source_entries,
+    }
+
+    prompt = (
+        "You are a strict ticket-price resolver. Use ONLY provided text. "
+        "Do not browse. Do not guess. Do not use outside knowledge. "
+        "If uncertain, return empty ticket_price. "
+        "Focus on main attraction admission, avoid packages/add-ons/sub-attractions. "
+        "Return JSON only with shape: "
+        '{"ticket_price":"PRICE_OR_EMPTY","price_type":"official|third_party|free|range|unknown","price_note":"SHORT_REASON"}. '
+        "Allowed ticket_price forms: RM 16, RM 16–RM 30, Free, or ''."
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
+
+    content = _normalize_text(getattr(response, "content", ""))
+    parsed = _parse_gemini_ticket_payload(content)
+    return parsed
+
+
 def _classify_platform(link: str, title: str = "") -> str:
     haystack = f"{link} {title}".lower()
     if any(x in haystack for x in ["official", ".gov", ".edu"]):
@@ -1308,7 +1436,18 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
             result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
         if not result["ticket_price"]:
             strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
-            if strong_price:
+            gemini_price = resolve_ticket_price_with_gemini(
+                attraction_name=attraction_name,
+                location=location,
+                sources=preferred_sources,
+                rule_based_price=strong_price,
+            )
+            gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
+            if gemini_ticket_price:
+                result["ticket_price"] = gemini_ticket_price
+                result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
+                result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
+            elif strong_price:
                 result["ticket_price"] = strong_price
                 result["price_type"] = "exact" if "–" not in strong_price else "range"
                 result["price_note"] = "Parsed from ticket-related source content"
