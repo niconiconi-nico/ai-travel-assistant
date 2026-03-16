@@ -220,6 +220,13 @@ def _format_myr_amount(amount: float) -> str:
     return f"RM {amount:.2f}"
 
 
+def _format_rm_clean(amount: float) -> str:
+    rounded = round(float(amount), 2)
+    if float(rounded).is_integer():
+        return f"RM {int(rounded)}"
+    return f"RM {rounded:.2f}"
+
+
 def _normalize_currency(value: str) -> str:
     upper = value.upper()
     if "MYR" in upper or re.search(r"\bRM\b", upper):
@@ -278,12 +285,12 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
         unique_values = sorted({round(v, 2) for v in reliable_values})
         if len(unique_values) == 1:
             return {
-                "ticket_price": _format_myr_amount(unique_values[0]),
+                "ticket_price": _format_rm_clean(unique_values[0]),
                 "price_type": "exact",
                 "price_note": "Official or government source",
             }
         return {
-            "ticket_price": f"RM {unique_values[0]:.2f}-{unique_values[-1]:.2f}",
+            "ticket_price": f"{_format_rm_clean(unique_values[0])}–{_format_rm_clean(unique_values[-1])}",
             "price_type": "range",
             "price_note": "Conflicting official/government prices",
         }
@@ -292,13 +299,13 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
     unique_third_party = sorted({round(v, 2) for v in third_party_values})
     if len(unique_third_party) > 1:
         return {
-            "ticket_price": f"RM {unique_third_party[0]:.2f}-{unique_third_party[-1]:.2f}",
+            "ticket_price": f"{_format_rm_clean(unique_third_party[0])}–{_format_rm_clean(unique_third_party[-1])}",
             "price_type": "range",
             "price_note": "Range derived from multiple non-official sources",
         }
     if len(unique_third_party) == 1:
         return {
-            "ticket_price": _format_myr_amount(unique_third_party[0]),
+            "ticket_price": _format_rm_clean(unique_third_party[0]),
             "price_type": "exact",
             "price_note": "Single non-official source",
         }
@@ -490,6 +497,142 @@ def _collect_price_candidates_from_sources(sources: list[dict[str, str]]) -> lis
         source_type = _infer_source_type(link)
         candidates.extend(_extract_price_candidates(combined, source_type=source_type, url=link))
     return candidates
+
+
+def _looks_like_ticket_source(title: str, link: str, snippet: str) -> bool:
+    corpus = f"{title} {link} {snippet}".lower()
+    wanted = [
+        "ticket", "admission", "price", "pricing", "rate", "faq", "visitor", "entry fee", "门票", "票价", "收费", "guide", ".pdf"
+    ]
+    return any(token in corpus for token in wanted)
+
+
+def _ticket_source_priority(title: str, link: str, snippet: str) -> int:
+    corpus = f"{title} {link} {snippet}".lower()
+    if any(token in corpus for token in ["official", "admission", "pricing", "rates", "ticket", ".pdf"]):
+        return 1
+    if any(token in corpus for token in ["faq", "visitor information", "visitor info"]):
+        return 2
+    if any(token in corpus for token in ["klook", "trip.com", "kkday", "booking", "traveloka"]):
+        return 3
+    return 4
+
+
+def _extract_text_from_html(html: str) -> str:
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.split())
+
+
+def _fetch_url_text(url: str, timeout: int = 10) -> str:
+    if not url.startswith("http"):
+        return ""
+    req = urllib.request.Request(url, headers={"User-Agent": "ai-travel-assistant/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_type = _normalize_text(resp.headers.get("Content-Type")).lower()
+            raw = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
+        return ""
+
+    if "pdf" in content_type or url.lower().endswith(".pdf"):
+        try:
+            decoded = raw.decode("latin-1", errors="ignore")
+        except Exception:
+            return ""
+        return " ".join(decoded.split())
+
+    try:
+        decoded = raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return _extract_text_from_html(decoded)
+
+
+def _extract_strong_ticket_values(text: str) -> list[dict[str, Any]]:
+    if not text:
+        return []
+
+    values: list[dict[str, Any]] = []
+    # exact amounts
+    for m in re.finditer(r"(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.IGNORECASE):
+        full = m.group(0)
+        context = text[max(0, m.start()-25): m.end()+25].lower()
+        if any(token in context for token in ["from", "starting", "start at", "package", "vary", "contact us"]):
+            continue
+        try:
+            amount = float(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        values.append({"kind": "exact", "amount": amount, "raw": full})
+
+    # ranges
+    for m in re.finditer(r"(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:-|–|to|~|～)\s*(?:RM|MYR)?\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.IGNORECASE):
+        context = text[max(0, m.start()-25): m.end()+25].lower()
+        if any(token in context for token in ["from", "starting", "package", "vary", "contact us"]):
+            continue
+        try:
+            low = float(m.group(1)); high = float(m.group(2))
+        except (TypeError, ValueError):
+            continue
+        if low > high:
+            low, high = high, low
+        values.append({"kind": "range", "low": low, "high": high, "raw": m.group(0)})
+
+    if re.search(r"\bfree\b|免费|免票", text, re.IGNORECASE):
+        values.append({"kind": "free", "raw": "Free"})
+
+    return values
+
+
+def _pick_ticket_price_from_values(values: list[dict[str, Any]]) -> str:
+    if not values:
+        return ""
+    if any(v.get("kind") == "free" for v in values):
+        return "Free"
+
+    exact_amounts = sorted({round(float(v["amount"]), 2) for v in values if v.get("kind") == "exact"})
+    ranges = [v for v in values if v.get("kind") == "range"]
+
+    if exact_amounts:
+        if len(exact_amounts) == 1:
+            return _format_rm_clean(exact_amounts[0])
+        return f"{_format_rm_clean(exact_amounts[0])}–{_format_rm_clean(exact_amounts[-1])}"
+
+    if ranges:
+        low = min(float(v["low"]) for v in ranges)
+        high = max(float(v["high"]) for v in ranges)
+        return f"{_format_rm_clean(low)}–{_format_rm_clean(high)}"
+
+    return ""
+
+
+def resolve_ticket_price_from_sources(sources: list[dict[str, str]]) -> str:
+    ranked = []
+    for src in sources:
+        title = _normalize_text(src.get("title"))
+        link = _normalize_text(src.get("link"))
+        snippet = _normalize_text(src.get("snippet"))
+        if not _looks_like_ticket_source(title, link, snippet):
+            continue
+        ranked.append((_ticket_source_priority(title, link, snippet), title, link, snippet))
+
+    ranked.sort(key=lambda x: x[0])
+    all_values: list[dict[str, Any]] = []
+    for _, title, link, snippet in ranked[:6]:
+        combined = f"{title} {snippet}".strip()
+        all_values.extend(_extract_strong_ticket_values(combined))
+
+        page_text = _fetch_url_text(link)
+        if page_text:
+            all_values.extend(_extract_strong_ticket_values(page_text))
+
+        picked = _pick_ticket_price_from_values(all_values)
+        if picked:
+            return picked
+
+    return _pick_ticket_price_from_values(all_values)
 
 
 def _classify_platform(link: str, title: str = "") -> str:
@@ -947,9 +1090,9 @@ def _is_valid_ticket_price_output(value: Any) -> bool:
     text = _normalize_text(value)
     if not text:
         return False
-    if not text.startswith("RM"):
-        return False
-    return bool(re.fullmatch(r"RM\s\d+(?:\.\d{2})?(?:-\d+(?:\.\d{2})?)?", text))
+    if text == "Free":
+        return True
+    return bool(re.fullmatch(r"RM\s\d+(?:\.\d{1,2})?(?:–RM\s\d+(?:\.\d{1,2})?)?", text))
 
 
 def _is_cache_entry_usable(entry: dict[str, Any]) -> bool:
@@ -1053,11 +1196,17 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
         if not result["opening_hours"]:
             result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
         if not result["ticket_price"]:
-            price_candidates = _collect_price_candidates_from_sources(preferred_sources)
-            price_resolution = resolve_ticket_price(price_candidates)
-            result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
-            result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
-            result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
+            strong_price = resolve_ticket_price_from_sources(preferred_sources)
+            if strong_price:
+                result["ticket_price"] = strong_price
+                result["price_type"] = "exact" if "–" not in strong_price else "range"
+                result["price_note"] = "Parsed from ticket-related source content"
+            else:
+                price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+                price_resolution = resolve_ticket_price(price_candidates)
+                result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
+                result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
+                result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
 
         if not result["image_url"]:
             try:

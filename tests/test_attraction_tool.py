@@ -259,3 +259,43 @@ def test_invalid_cached_entry_should_be_recomputed(monkeypatch):
     assert "&sa=" not in result["opening_hours"]
     assert result["ticket_price"] != "rM7"
     assert result["ticket_price"].startswith("RM") or result["ticket_price"] == "Free"
+
+
+def test_resolve_ticket_price_from_sources_prefers_page_content(monkeypatch):
+    sources = [
+        {
+            "title": "Official Tickets",
+            "link": "https://example.com/tickets",
+            "snippet": "Admission details",
+        }
+    ]
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: "General admission RM 30. Child RM 15.",
+    )
+
+    result = attraction_tool.resolve_ticket_price_from_sources(sources)
+
+    assert result == "RM 15–RM 30"
+
+
+def test_resolve_ticket_price_from_sources_rejects_uncertain_phrases(monkeypatch):
+    sources = [
+        {
+            "title": "Official FAQ",
+            "link": "https://example.com/faq",
+            "snippet": "ticket info",
+        }
+    ]
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: "Ticket prices start from RM 20 and prices vary by package.",
+    )
+
+    result = attraction_tool.resolve_ticket_price_from_sources(sources)
+
+    assert result == ""
