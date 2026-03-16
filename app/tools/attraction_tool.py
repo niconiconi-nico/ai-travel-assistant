@@ -58,6 +58,10 @@ _FIXED_EXCHANGE_RATES: dict[str, float] = {
 }
 
 
+def _debug_log(message: str) -> None:
+    print(f"[attraction_tool][debug] {message}")
+
+
 def _normalize_text(value: Any) -> str:
     if value is None:
         return ""
@@ -118,6 +122,13 @@ def is_valid_opening_hours(text: str) -> bool:
             re.IGNORECASE,
         )
     )
+    has_time_range = bool(
+        re.search(
+            r"(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))",
+            value,
+            re.IGNORECASE,
+        )
+    )
     has_day_or_month = bool(
         re.search(
             r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun|January|February|March|April|May|June|July|August|September|October|November|December",
@@ -125,11 +136,18 @@ def is_valid_opening_hours(text: str) -> bool:
             re.IGNORECASE,
         )
     )
-    has_hours_keyword = bool(re.search(r"opening\s*hours|open|closed|营业时间|开放时间", value, re.IGNORECASE))
+    has_hours_keyword = bool(
+        re.search(r"opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|open|closed|营业时间|开放时间", value, re.IGNORECASE)
+    )
 
-    if has_time:
+    if re.search(r"\b\d+\s*(?:to|-)\s*\d+\s*hours?\b", value, re.IGNORECASE):
+        return False
+
+    if has_time_range:
         return True
-    if has_day_or_month and has_hours_keyword:
+    if has_time and has_hours_keyword:
+        return True
+    if has_day_or_month and has_hours_keyword and has_time:
         return True
     return False
 
@@ -164,18 +182,15 @@ def _extract_hours_from_sources(sources: list[dict[str, str]]) -> str:
 
 
 def _extract_hours(text: str) -> str:
-    cleaned = clean_opening_hours(text)
-    if cleaned:
-        return cleaned
+    if not text:
+        return ""
 
     patterns = [
-        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[^\n]{0,120}\d{1,2}[:.]?\d{0,2}\s?(?:AM|PM|am|pm)?[^\n]{0,120}",
-        r"\d{1,2}[:.]\d{2}\s?(?:AM|PM|am|pm)?\s?(?:-|–|to|至)\s?\d{1,2}[:.]\d{2}\s?(?:AM|PM|am|pm)?",
-        r"(?:open|opening\s*hours|营业时间|开放时间|Closed\s+on)[:：]?\s*[^\n\.;]{4,80}",
+        r"(?:opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|营业时间|开放时间)[:：]?\s*[^\n\.;]{4,120}",
+        r"(?:\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?\b[^\n]{0,120})?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
             candidate = clean_opening_hours(match.group(0))
             if candidate:
                 return candidate
@@ -811,6 +826,7 @@ def resolve_ticket_price_with_gemini(
     rule_based_price: str = "",
 ) -> dict[str, str]:
     api_key = _resolve_gemini_api_key()
+    _debug_log(f"gemini_api_key_found={bool(api_key)}")
     if not api_key or not sources:
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
 
@@ -821,7 +837,9 @@ def resolve_ticket_price_with_gemini(
         snippet = _normalize_text(source.get("snippet"))
         if not _looks_like_ticket_source(title, link, snippet):
             continue
+        _debug_log(f"ticket_source_selected url={link} source_type={_ticket_source_priority(title, link, snippet)}")
         page_text = _fetch_url_text(link)
+        _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
         if not page_text and not snippet:
             continue
         ranked_sources.append((_ticket_source_priority(title, link, snippet), source, page_text))
@@ -830,6 +848,7 @@ def resolve_ticket_price_with_gemini(
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
 
     ranked_sources.sort(key=lambda x: x[0])
+    _debug_log("gemini_resolver_called=True")
     source_entries: list[dict[str, str]] = []
     for priority, source, page_text in ranked_sources[:4]:
         title = _normalize_text(source.get("title"))
@@ -844,6 +863,9 @@ def resolve_ticket_price_with_gemini(
                 "content": page_text[:2200],
                 "rule_candidates": _extract_strong_ticket_values(f"{title}\n{snippet}\n{page_text}", attraction_name=attraction_name),
             }
+        )
+        _debug_log(
+            f"gemini_source_payload url={link} priority={priority} rule_candidates={json.dumps(source_entries[-1]['rule_candidates'], ensure_ascii=False)}"
         )
 
     payload = {
@@ -867,9 +889,11 @@ def resolve_ticket_price_with_gemini(
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
         response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
     except Exception:
+        _debug_log("gemini_call_failed=True")
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
 
     content = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"gemini_raw_response={content[:500]}")
     parsed = _parse_gemini_ticket_payload(content)
     return parsed
 
@@ -1400,6 +1424,7 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
         result["sources"].append(nominatim_result["osm_url"])
 
     api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    _debug_log(f"serpapi_api_key_found={bool(api_key)}")
     preferred_sources: list[dict[str, str]] = []
     all_organic: list[dict[str, Any]] = []
 
@@ -1430,12 +1455,21 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
                 text_blobs.append(_normalize_text(item.get("snippet")))
 
         preferred_sources = collect_preferred_sources(all_organic, min_count=3)
+        for src in preferred_sources:
+            title = _normalize_text(src.get("title"))
+            link = _normalize_text(src.get("link"))
+            snippet = _normalize_text(src.get("snippet"))
+            _debug_log(
+                f"preferred_ticket_source url={link} source_type={_ticket_source_priority(title, link, snippet)}"
+            )
         merged_text = "\n".join(t for t in text_blobs if t)
 
         if not result["opening_hours"]:
             result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
+            _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
             strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
+            _debug_log(f"rule_based_price={strong_price}")
             gemini_price = resolve_ticket_price_with_gemini(
                 attraction_name=attraction_name,
                 location=location,
@@ -1447,16 +1481,20 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
                 result["ticket_price"] = gemini_ticket_price
                 result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
                 result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
+                _debug_log("ticket_price_path=gemini")
             elif strong_price:
                 result["ticket_price"] = strong_price
                 result["price_type"] = "exact" if "–" not in strong_price else "range"
                 result["price_note"] = "Parsed from ticket-related source content"
+                _debug_log("ticket_price_path=rule_based_fallback")
             else:
                 price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+                _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
                 price_resolution = resolve_ticket_price(price_candidates)
                 result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
                 result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
                 result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
+                _debug_log("ticket_price_path=legacy_fallback")
 
         if not result["image_url"]:
             try:
@@ -1469,6 +1507,8 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
             link = _normalize_text(source.get("link"))
             if link:
                 result["sources"].append(link)
+    else:
+        _debug_log("ticket_price_search_enrichment_skipped_no_serpapi_key=True")
 
     if not result["visit_duration"]:
         result["visit_duration"] = estimate_visit_duration(attraction_name, result.get("description", ""))

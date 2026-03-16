@@ -359,6 +359,13 @@ def test_price_like_line_should_not_be_opening_hours(monkeypatch):
     assert result["ticket_price"].startswith("RM")
 
 
+def test_opening_hours_requires_labeled_or_time_range_format():
+    assert attraction_tool.is_valid_opening_hours("Open Daily: 10:00 AM - 8:00 PM")
+    assert attraction_tool.is_valid_opening_hours("09:00-18:00")
+    assert not attraction_tool.is_valid_opening_hours("Visit duration 1 to 2 hours")
+    assert not attraction_tool.is_valid_opening_hours("Malaysia: Aquaria KLCC Admission E-Ticket · 1 to 2 hours · $17.47")
+
+
 def test_parse_gemini_ticket_payload_handles_markdown_json():
     raw = """```json
 {"ticket_price":"$17.47","price_type":"third_party","price_note":"ota page"}
