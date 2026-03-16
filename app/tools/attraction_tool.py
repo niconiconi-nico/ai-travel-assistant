@@ -79,6 +79,19 @@ def _save_cache(cache: dict[str, dict[str, Any]]) -> None:
     _CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _contains_price_or_ticket_tokens(text: str) -> bool:
+    value = _normalize_text(text)
+    if not value:
+        return False
+    return bool(
+        re.search(
+            r"\bRM\b|\bMYR\b|\$\s?\d|\bAdult\b|\bChild\b|\bTicket\b|\bAdmission\b|per\s+adult|\bprice\b|门票|票价|收费",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
 def is_valid_opening_hours(text: str) -> bool:
     if not text:
         return False
@@ -91,12 +104,15 @@ def is_valid_opening_hours(text: str) -> bool:
     if any(re.search(pat, value, re.IGNORECASE) for pat in blocked_patterns):
         return False
 
+    if _contains_price_or_ticket_tokens(value):
+        return False
+
     if re.search(r"[A-Za-z0-9_-]{30,}", value):
         return False
 
     has_time = bool(
         re.search(
-            r"\b\d{1,2}:\d{2}\b|\b\d{1,2}\s?(?:AM|PM|am|pm)\b|\b\d{1,2}(?::\d{2})?\s?(?:-|–|to|至)\s?\d{1,2}(?::\d{2})?\s?(?:AM|PM|am|pm)?\b",
+            r"\b\d{1,2}:\d{2}\b|\b\d{1,2}\s?(?:AM|PM|am|pm)\b|\b(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\b",
             value,
             re.IGNORECASE,
         )
@@ -137,7 +153,10 @@ def _extract_hours_from_sources(sources: list[dict[str, str]]) -> str:
     for src in sources:
         snippet = _normalize_text(src.get("snippet"))
         title = _normalize_text(src.get("title"))
-        candidate = clean_opening_hours(f"{title}. {snippet}")
+        merged = f"{title}. {snippet}"
+        if _contains_price_or_ticket_tokens(merged):
+            continue
+        candidate = clean_opening_hours(merged)
         if candidate:
             return candidate
     return ""
@@ -633,6 +652,39 @@ def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[
         if low > high:
             low, high = high, low
         values.append({"kind": "range", "low": low, "high": high, "raw": m.group(0), "score": positive_score})
+
+    for m in re.finditer(r"\$\s*([0-9]+(?:\.[0-9]{1,2})?)(?:\s*(?:-|–|to|~|～)\s*\$?\s*([0-9]+(?:\.[0-9]{1,2})?))?", text):
+        context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
+        if any(token in context for token in ["from", "starting", "package", "vary", "contact us"]):
+            continue
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon"]):
+            continue
+
+        positive_score = 0
+        if any(token in context for token in ["adult", "general", "admission", "entry", "standard", "ticket", "price", "rate", "fare"]):
+            positive_score += 2
+        if any(token in context for token in ["child", "children", "kid", "student", "senior"]):
+            positive_score -= 1
+        if positive_score < 1:
+            continue
+
+        try:
+            low_usd = float(m.group(1))
+            high_usd = float(m.group(2)) if m.group(2) else None
+        except (TypeError, ValueError):
+            continue
+
+        low_myr = convert_to_myr(low_usd, "USD")
+        if low_myr is None:
+            continue
+        if high_usd is None:
+            values.append({"kind": "exact", "amount": low_myr, "raw": m.group(0), "score": positive_score})
+        else:
+            high_myr = convert_to_myr(high_usd, "USD")
+            if high_myr is None:
+                continue
+            low, high = (low_myr, high_myr) if low_myr <= high_myr else (high_myr, low_myr)
+            values.append({"kind": "range", "low": low, "high": high, "raw": m.group(0), "score": positive_score})
 
     if re.search(r"\bfree\b|免费|免票", text, re.IGNORECASE):
         values.append({"kind": "free", "raw": "Free", "score": 1})

@@ -319,3 +319,41 @@ def test_resolve_ticket_price_ignores_sub_attraction_context(monkeypatch):
     result = attraction_tool.resolve_ticket_price_from_sources(sources, attraction_name="Penang Hill")
 
     assert result == ""
+
+
+def test_price_like_line_should_not_be_opening_hours(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "knowledge_graph": {},
+            "answer_box": {},
+            "organic_results": [
+                {
+                    "title": "Aquaria KLCC Admission E-Ticket",
+                    "link": "https://example.com/aquaria-ticket",
+                    "snippet": "Malaysia: Aquaria KLCC Admission E-Ticket · 1 to 2 hours · $17.47",
+                },
+                {
+                    "title": "Official Site",
+                    "link": "https://example.com/official",
+                    "snippet": "Visit info",
+                },
+                {
+                    "title": "FAQ",
+                    "link": "https://example.com/faq",
+                    "snippet": "Ticket details",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+    monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
+    monkeypatch.setattr(attraction_tool, "_fetch_url_text", lambda url, timeout=10: "Malaysia: Aquaria KLCC Admission E-Ticket · 1 to 2 hours · $17.47")
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_price_opening.json"))
+
+    result = attraction_tool.get_attraction_info("Aquaria KLCC", "Kuala Lumpur")
+
+    assert "Admission" not in result["opening_hours"]
+    assert "$" not in result["opening_hours"]
+    assert result["ticket_price"].startswith("RM")
