@@ -299,3 +299,23 @@ def test_resolve_ticket_price_from_sources_rejects_uncertain_phrases(monkeypatch
     result = attraction_tool.resolve_ticket_price_from_sources(sources)
 
     assert result == ""
+
+
+def test_resolve_ticket_price_ignores_sub_attraction_context(monkeypatch):
+    sources = [
+        {
+            "title": "Penang Hill Tickets",
+            "link": "https://example.com/penang-hill-tickets",
+            "snippet": "official admission",
+        }
+    ]
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: "The Habitat Penang Hill package RM 98. Add-on canopy walk RM 60.",
+    )
+
+    result = attraction_tool.resolve_ticket_price_from_sources(sources, attraction_name="Penang Hill")
+
+    assert result == ""

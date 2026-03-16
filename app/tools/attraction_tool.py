@@ -499,23 +499,45 @@ def _collect_price_candidates_from_sources(sources: list[dict[str, str]]) -> lis
     return candidates
 
 
+def _extract_domain(url: str) -> str:
+    value = _normalize_text(url).lower()
+    if not value:
+        return ""
+    parsed = urllib.parse.urlparse(value)
+    return parsed.netloc or ""
+
+
 def _looks_like_ticket_source(title: str, link: str, snippet: str) -> bool:
     corpus = f"{title} {link} {snippet}".lower()
     wanted = [
-        "ticket", "admission", "price", "pricing", "rate", "faq", "visitor", "entry fee", "门票", "票价", "收费", "guide", ".pdf"
+        "ticket", "admission", "price", "pricing", "rate", "rates", "faq", "visitor", "entry fee", "门票", "票价", "收费", "guide", "facilities", ".pdf",
     ]
     return any(token in corpus for token in wanted)
 
 
 def _ticket_source_priority(title: str, link: str, snippet: str) -> int:
     corpus = f"{title} {link} {snippet}".lower()
-    if any(token in corpus for token in ["official", "admission", "pricing", "rates", "ticket", ".pdf"]):
-        return 1
-    if any(token in corpus for token in ["faq", "visitor information", "visitor info"]):
-        return 2
-    if any(token in corpus for token in ["klook", "trip.com", "kkday", "booking", "traveloka"]):
-        return 3
-    return 4
+    domain = _extract_domain(link)
+
+    official_like = any(
+        token in domain for token in [".gov", ".edu", "official", "tourism", "hillrailway", "penanghill"]
+    )
+    has_ticket_intent = any(
+        token in corpus for token in ["ticket", "admission", "pricing", "rates", "entry fee", "price", "/ticket", "/admission", "/pricing", "/rates"]
+    )
+    has_info_intent = any(token in corpus for token in ["faq", "visitor information", "visitor info", "facilities"])
+    is_pdf = ".pdf" in corpus
+    third_party = any(token in corpus for token in ["klook", "trip.com", "kkday", "booking", "traveloka", "tripadvisor"])
+
+    if official_like and (has_ticket_intent or is_pdf):
+        return 10
+    if official_like and has_info_intent:
+        return 20
+    if official_like:
+        return 30
+    if third_party:
+        return 40
+    return 50
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -550,38 +572,70 @@ def _fetch_url_text(url: str, timeout: int = 10) -> str:
     return _extract_text_from_html(decoded)
 
 
-def _extract_strong_ticket_values(text: str) -> list[dict[str, Any]]:
+def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[dict[str, Any]]:
     if not text:
         return []
 
     values: list[dict[str, Any]] = []
-    # exact amounts
+    lowered_text = text.lower()
+
     for m in re.finditer(r"(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.IGNORECASE):
         full = m.group(0)
-        context = text[max(0, m.start()-25): m.end()+25].lower()
+        context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
+
         if any(token in context for token in ["from", "starting", "start at", "package", "vary", "contact us"]):
             continue
+
+        positive_score = 0
+        if any(token in context for token in ["adult", "general", "admission", "entry", "standard", "normal"]):
+            positive_score += 2
+        if any(token in context for token in ["ticket", "price", "rate", "fare"]):
+            positive_score += 1
+
+        negative_score = 0
+        if any(token in context for token in ["child", "children", "kid", "senior", "student"]):
+            negative_score += 1
+        if any(token in context for token in ["package", "combo", "add-on", "addon", "express lane"]):
+            negative_score += 2
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "funicular package"]):
+            negative_score += 2
+
+        if attraction_name and attraction_name.lower() not in lowered_text and "general admission" not in lowered_text:
+            negative_score += 1
+
+        if positive_score - negative_score < 0:
+            continue
+
         try:
             amount = float(m.group(1))
         except (TypeError, ValueError):
             continue
-        values.append({"kind": "exact", "amount": amount, "raw": full})
+        values.append({"kind": "exact", "amount": amount, "raw": full, "score": positive_score - negative_score})
 
-    # ranges
     for m in re.finditer(r"(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:-|–|to|~|～)\s*(?:RM|MYR)?\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.IGNORECASE):
-        context = text[max(0, m.start()-25): m.end()+25].lower()
+        context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
         if any(token in context for token in ["from", "starting", "package", "vary", "contact us"]):
             continue
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon"]):
+            continue
+
+        positive_score = 0
+        if any(token in context for token in ["adult", "general", "admission", "entry", "standard"]):
+            positive_score += 2
+        if any(token in context for token in ["ticket", "price", "rate", "fare"]):
+            positive_score += 1
+
         try:
-            low = float(m.group(1)); high = float(m.group(2))
+            low = float(m.group(1))
+            high = float(m.group(2))
         except (TypeError, ValueError):
             continue
         if low > high:
             low, high = high, low
-        values.append({"kind": "range", "low": low, "high": high, "raw": m.group(0)})
+        values.append({"kind": "range", "low": low, "high": high, "raw": m.group(0), "score": positive_score})
 
     if re.search(r"\bfree\b|免费|免票", text, re.IGNORECASE):
-        values.append({"kind": "free", "raw": "Free"})
+        values.append({"kind": "free", "raw": "Free", "score": 1})
 
     return values
 
@@ -589,11 +643,16 @@ def _extract_strong_ticket_values(text: str) -> list[dict[str, Any]]:
 def _pick_ticket_price_from_values(values: list[dict[str, Any]]) -> str:
     if not values:
         return ""
-    if any(v.get("kind") == "free" for v in values):
+
+    reliable = [v for v in values if int(v.get("score", 0)) >= 1 or v.get("kind") == "free"]
+    if not reliable:
+        return ""
+
+    if any(v.get("kind") == "free" for v in reliable):
         return "Free"
 
-    exact_amounts = sorted({round(float(v["amount"]), 2) for v in values if v.get("kind") == "exact"})
-    ranges = [v for v in values if v.get("kind") == "range"]
+    exact_amounts = sorted({round(float(v["amount"]), 2) for v in reliable if v.get("kind") == "exact"})
+    ranges = [v for v in reliable if v.get("kind") == "range"]
 
     if exact_amounts:
         if len(exact_amounts) == 1:
@@ -608,7 +667,7 @@ def _pick_ticket_price_from_values(values: list[dict[str, Any]]) -> str:
     return ""
 
 
-def resolve_ticket_price_from_sources(sources: list[dict[str, str]]) -> str:
+def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_name: str = "") -> str:
     ranked = []
     for src in sources:
         title = _normalize_text(src.get("title"))
@@ -620,13 +679,13 @@ def resolve_ticket_price_from_sources(sources: list[dict[str, str]]) -> str:
 
     ranked.sort(key=lambda x: x[0])
     all_values: list[dict[str, Any]] = []
-    for _, title, link, snippet in ranked[:6]:
+    for _, title, link, snippet in ranked[:8]:
         combined = f"{title} {snippet}".strip()
-        all_values.extend(_extract_strong_ticket_values(combined))
+        all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
 
         page_text = _fetch_url_text(link)
         if page_text:
-            all_values.extend(_extract_strong_ticket_values(page_text))
+            all_values.extend(_extract_strong_ticket_values(page_text, attraction_name=attraction_name))
 
         picked = _pick_ticket_price_from_values(all_values)
         if picked:
@@ -1196,7 +1255,7 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
         if not result["opening_hours"]:
             result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
         if not result["ticket_price"]:
-            strong_price = resolve_ticket_price_from_sources(preferred_sources)
+            strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
             if strong_price:
                 result["ticket_price"] = strong_price
                 result["price_type"] = "exact" if "–" not in strong_price else "range"
