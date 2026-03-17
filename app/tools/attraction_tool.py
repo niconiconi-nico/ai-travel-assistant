@@ -1275,76 +1275,261 @@ def _is_plausible_attraction_name(name: str) -> bool:
     return True
 
 
+def _has_placeholder_description(text: str) -> bool:
+    value = _normalize_text(text).lower()
+    if not value:
+        return True
+    placeholders = {
+        "popular attraction in this destination.",
+        "popular attraction in this destination",
+        "top attraction",
+        "must-visit attraction",
+    }
+    return value in placeholders
+
+
+def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
+    name = _normalize_text(candidate.get("name"))
+    desc = _normalize_text(candidate.get("description"))
+    ticket = _normalize_text(candidate.get("ticket_price"))
+    image = _normalize_text(candidate.get("image"))
+    sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+    source_count = len([s for s in sources if _normalize_text(s)])
+
+    score = 0
+    if not _has_placeholder_description(desc):
+        score += 4
+    if image.startswith("http"):
+        score += 2
+    if ticket and _is_valid_ticket_price_output(ticket):
+        score += 2
+    score += min(3, source_count)
+    if city.lower() in name.lower():
+        score += 1
+    if any(token in name.lower() for token in ["museum", "temple", "hill", "fort", "heritage", "park", "tower"]):
+        score += 1
+    return score
+
+
+def _parse_recommendation_gemini_payload(raw_text: str) -> list[dict[str, str]]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return []
+    if "```" in text:
+        text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    attractions = payload.get("attractions", []) if isinstance(payload.get("attractions"), list) else []
+    normalized: list[dict[str, str]] = []
+    for item in attractions:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "name": _normalize_text(item.get("name")),
+                "description": _normalize_text(item.get("description")),
+                "image": _normalize_text(item.get("image")),
+                "ticket_price": _normalize_text(item.get("ticket_price")),
+            }
+        )
+    return normalized
+
+
+def normalize_recommendations_with_gemini(
+    user_query: str,
+    city: str,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    api_key = _resolve_gemini_api_key()
+    _debug_log(f"recommendation_gemini_api_key_found={bool(api_key)}")
+    if not api_key or not candidates:
+        return candidates
+
+    payload = {
+        "user_query": _normalize_text(user_query),
+        "city": city,
+        "candidates": [
+            {
+                "name": _normalize_text(c.get("name")),
+                "description": _normalize_text(c.get("description")),
+                "image": _normalize_text(c.get("image")),
+                "ticket_price": _normalize_text(c.get("ticket_price")),
+                "sources": c.get("sources", []) if isinstance(c.get("sources"), list) else [],
+            }
+            for c in candidates
+        ],
+    }
+
+    prompt = (
+        "You are a strict attraction recommendation normalizer and reranker. "
+        "Use ONLY provided candidate data. Do not browse web. Do not invent facts. "
+        "Keep only relevant attraction entities for the target city. "
+        "Remove weak/generic low-value candidates when needed. "
+        "Descriptions must be short and clean. "
+        "Never invent image URLs or ticket prices. Keep unsupported image/ticket_price as ''. "
+        "Return JSON only in shape: {\"attractions\":[{\"name\":\"\",\"description\":\"\",\"image\":\"\",\"ticket_price\":\"\"}]}."
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        _debug_log("recommendation_gemini_call_failed=True")
+        return candidates
+
+    raw = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"recommendation_gemini_raw={raw[:500]}")
+    parsed = _parse_recommendation_gemini_payload(raw)
+    if not parsed:
+        return candidates
+
+    by_name = {(_normalize_text(c.get("name")).lower()): c for c in candidates if _normalize_text(c.get("name"))}
+    normalized: list[dict[str, Any]] = []
+    for item in parsed:
+        name = _normalize_text(item.get("name"))
+        base = by_name.get(name.lower())
+        if not name or not base:
+            continue
+
+        final_image = _normalize_text(item.get("image"))
+        if final_image and final_image != _normalize_text(base.get("image")):
+            final_image = _normalize_text(base.get("image"))
+
+        final_ticket = _normalize_text(item.get("ticket_price"))
+        if final_ticket and final_ticket != _normalize_text(base.get("ticket_price")):
+            final_ticket = _normalize_text(base.get("ticket_price"))
+        if final_ticket and not _is_valid_ticket_price_output(final_ticket):
+            final_ticket = ""
+
+        normalized.append(
+            {
+                "name": name,
+                "description": _normalize_text(item.get("description")) or _normalize_text(base.get("description")),
+                "image": final_image,
+                "ticket_price": final_ticket,
+                "sources": base.get("sources", []) if isinstance(base.get("sources"), list) else [],
+                "score": _recommendation_quality_score(base, city),
+            }
+        )
+
+    return normalized or candidates
+
+
 def get_attractions_by_place(place: str, query_type: str | None = None) -> list[dict[str, str]]:
-    _ = query_type
+    query_hint = _normalize_text(query_type)
     place = _normalize_text(place)
     if not place:
         return []
 
     osm_pois = _get_osm_city_pois(place, limit=14)
-    candidates: list[dict[str, str]] = []
+    candidates: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
     for poi in osm_pois:
-        name = _normalize_text(poi.get("name"))
+        enriched = _enrich_poi_with_knowledge(poi, place)
+        name = _normalize_text(enriched.get("name"))
         if not _is_plausible_attraction_name(name):
             continue
         key = name.lower()
         if key in seen_names:
             continue
         seen_names.add(key)
-        desc = _normalize_text(poi.get("description")) or "Popular attraction in this destination."
-        source = ""
-        for src in poi.get("sources", []) if isinstance(poi.get("sources"), list) else []:
-            source = _normalize_text(src)
-            if source:
-                break
-        candidates.append({"name": name, "brief_description": desc, "source_link": source})
-        if len(candidates) >= 12:
-            return candidates
+        desc = _normalize_text(enriched.get("description"))
+        sources = enriched.get("sources", []) if isinstance(enriched.get("sources"), list) else []
+        candidates.append(
+            {
+                "name": name,
+                "description": desc,
+                "image": _normalize_text(enriched.get("image")),
+                "ticket_price": _normalize_text(enriched.get("ticket_price")),
+                "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
+                "score": _recommendation_quality_score(enriched, place),
+            }
+        )
+        if len(candidates) >= 14:
+            break
 
     api_key = os.getenv("SERPAPI_API_KEY", "").strip()
-    if not api_key:
-        return candidates
+    if api_key and len(candidates) < 10:
+        base_queries = [
+            f"{place} tourist attractions",
+            f"{place} best attractions",
+            f"{place} things to do",
+            f"{place} 景点",
+        ]
 
-    base_queries = [
-        f"{place} tourist attractions",
-        f"{place} best attractions",
-        f"{place} things to do",
-        f"{place} 景点",
-    ]
+        for query in base_queries:
+            try:
+                payload = _search_google(query, api_key)
+            except Exception:
+                continue
 
-    for query in base_queries:
-        try:
-            payload = _search_google(query, api_key)
-        except Exception:
+            for item in payload.get("organic_results", [])[:10]:
+                title = _normalize_text(item.get("title"))
+                link = _normalize_text(item.get("link"))
+                snippet = _normalize_text(item.get("snippet"))
+
+                name = re.split(r"\s[-|–]\s", title)[0].strip() if title else ""
+                if not _is_plausible_attraction_name(name):
+                    continue
+
+                name_key = name.lower()
+                if name_key in seen_names:
+                    continue
+                seen_names.add(name_key)
+
+                candidates.append(
+                    {
+                        "name": name,
+                        "description": snippet,
+                        "image": "",
+                        "ticket_price": "",
+                        "sources": [link] if link else [],
+                        "score": 0,
+                    }
+                )
+                if len(candidates) >= 14:
+                    break
+
+    candidates = [c for c in candidates if _is_plausible_attraction_name(_normalize_text(c.get("name")))]
+    candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
+    normalized = normalize_recommendations_with_gemini(user_query=query_hint or place, city=place, candidates=candidates[:14])
+    if not normalized:
+        normalized = candidates[:12]
+
+    final_items: list[dict[str, str]] = []
+    for item in normalized[:12]:
+        name = _normalize_text(item.get("name"))
+        if not _is_plausible_attraction_name(name):
             continue
-
-        for item in payload.get("organic_results", [])[:10]:
-            title = _normalize_text(item.get("title"))
-            link = _normalize_text(item.get("link"))
-            snippet = _normalize_text(item.get("snippet"))
-
-            name = re.split(r"\s[-|–]\s", title)[0].strip() if title else ""
-            if not _is_plausible_attraction_name(name):
-                continue
-
-            name_key = name.lower()
-            if name_key in seen_names:
-                continue
-            seen_names.add(name_key)
-
-            candidates.append(
-                {
-                    "name": name,
-                    "brief_description": snippet or "Popular attraction in this destination.",
-                    "source_link": link,
-                }
-            )
-            if len(candidates) >= 12:
-                return candidates
-
-    return candidates
+        desc = _normalize_text(item.get("description"))
+        if _has_placeholder_description(desc):
+            desc = ""
+        sources = item.get("sources", []) if isinstance(item.get("sources"), list) else []
+        source_link = _normalize_text(sources[0]) if sources else ""
+        final_items.append(
+            {
+                "name": name,
+                "brief_description": desc,
+                "source_link": source_link,
+            }
+        )
+    return final_items
 
 
 def _is_valid_ticket_price_output(value: Any) -> bool:

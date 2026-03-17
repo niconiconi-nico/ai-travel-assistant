@@ -107,6 +107,90 @@ def test_get_attractions_by_place(monkeypatch):
     assert all("name" in item and "brief_description" in item and "source_link" in item for item in results)
 
 
+def test_normalize_recommendations_with_gemini_reorders_and_sanitizes(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+
+    class DummyResp:
+        content = '{"attractions":[{"name":"A Museum","description":"A curated museum stop.","image":"https://img/a.jpg","ticket_price":"RM 20"},{"name":"B Park","description":"Green urban park.","image":"https://img/should-not-pass.jpg","ticket_price":"RM 999"}]}'
+
+    class DummyLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def invoke(self, _prompt: str):
+            return DummyResp()
+
+    monkeypatch.setattr(attraction_tool, "ChatGoogleGenerativeAI", DummyLLM)
+    candidates = [
+        {
+            "name": "A Museum",
+            "description": "Museum description",
+            "image": "https://img/a.jpg",
+            "ticket_price": "RM 20",
+            "sources": ["https://example.com/a"],
+        },
+        {
+            "name": "B Park",
+            "description": "Park description",
+            "image": "",
+            "ticket_price": "",
+            "sources": ["https://example.com/b"],
+        },
+    ]
+
+    normalized = attraction_tool.normalize_recommendations_with_gemini(
+        user_query="Top attractions in City",
+        city="City",
+        candidates=candidates,
+    )
+
+    assert normalized[0]["name"] == "A Museum"
+    assert normalized[0]["image"] == "https://img/a.jpg"
+    assert normalized[1]["name"] == "B Park"
+    assert normalized[1]["image"] == ""
+    assert normalized[1]["ticket_price"] == ""
+
+
+def test_get_attractions_by_place_uses_gemini_normalized_order(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_get_osm_city_pois",
+        lambda place, limit=14: [
+            {"name": "Raw One", "description": "Popular attraction in this destination.", "image": "", "ticket_price": "", "sources": []},
+            {"name": "Raw Two", "description": "Good spot", "image": "", "ticket_price": "", "sources": []},
+        ],
+    )
+    monkeypatch.setattr(attraction_tool, "_enrich_poi_with_knowledge", lambda poi, location=None: poi)
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: [
+            {
+                "name": "Raw Two",
+                "description": "Curated description",
+                "image": "",
+                "ticket_price": "",
+                "sources": ["https://example.com/raw-two"],
+            },
+            {
+                "name": "Raw One",
+                "description": "Popular attraction in this destination.",
+                "image": "",
+                "ticket_price": "",
+                "sources": ["https://example.com/raw-one"],
+            },
+        ],
+    )
+
+    result = attraction_tool.get_attractions_by_place("City")
+
+    assert result[0]["name"] == "Raw Two"
+    assert result[0]["brief_description"] == "Curated description"
+    assert result[1]["brief_description"] == ""
+
+
 def test_opening_hours_and_ticket_price_cleaning(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
 
