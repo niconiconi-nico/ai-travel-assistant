@@ -455,7 +455,13 @@ def test_opening_hours_requires_labeled_or_time_range_format():
     assert not attraction_tool.is_valid_opening_hours("00 AM - 9:00")
     assert not attraction_tool.is_valid_opening_hours("30 AM–4:30")
     assert not attraction_tool.is_valid_opening_hours("Open Daily 78 Armenian Street | Georgetown | 10am ~ 10pm")
+    assert not attraction_tool.is_valid_opening_hours('Monday", "hours": "8:30 AM–4:30')
     assert not attraction_tool.is_valid_opening_hours("Malaysia: Aquaria KLCC Admission E-Ticket · 1 to 2 hours · $17.47")
+
+
+def test_clean_opening_hours_extracts_range_from_labeled_jsonish_line():
+    raw = 'Opening hours: Monday", "hours": "8:30 AM–4:30 PM", "note":"closed tuesday"'
+    assert attraction_tool.clean_opening_hours(raw) == "8:30 AM–4:30 PM"
 
 
 def test_opening_hours_rejects_zero_text_review_sources(monkeypatch):
@@ -482,7 +488,9 @@ def test_opening_hours_rejects_zero_text_review_sources(monkeypatch):
     monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
     monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
     monkeypatch.setattr(attraction_tool, "_fetch_url_text", lambda url, timeout=10: "")
-    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_hours_source_gate.json"))
+    cache_path = Path("/tmp/attraction_tool_test_cache_hours_source_gate.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
 
     result = attraction_tool.get_attraction_info("Demo Attraction", "City")
 
@@ -544,3 +552,32 @@ def test_get_attraction_info_prefers_gemini_ticket_resolution(monkeypatch):
 
     assert result["ticket_price"] == "RM 30"
     assert result["price_type"] == "official"
+
+
+def test_gemini_ticket_resolution_uses_official_homepage_when_no_ticket_keyword(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+    sources = [
+        {
+            "title": "Official Website",
+            "link": "https://example.com/official-home",
+            "snippet": "Visit info and contact",
+        }
+    ]
+
+    class DummyResp:
+        content = '{"ticket_price":"RM 25","price_type":"official","price_note":"main admission"}'
+
+    class DummyLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def invoke(self, _prompt: str):
+            return DummyResp()
+
+    monkeypatch.setattr(attraction_tool, "ChatGoogleGenerativeAI", DummyLLM)
+    monkeypatch.setattr(attraction_tool, "_fetch_url_text", lambda url, timeout=10: "Official admission RM 25 for adults")
+
+    parsed = attraction_tool.resolve_ticket_price_with_gemini("Demo", "City", sources)
+
+    assert parsed["ticket_price"] == "RM 25"
+    assert parsed["price_type"] == "official"

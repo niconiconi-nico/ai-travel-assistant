@@ -133,6 +133,17 @@ def _has_strict_time_range(text: str) -> bool:
     return bool(re.search(pattern, value))
 
 
+def _extract_first_time_range(text: str) -> str:
+    value = _normalize_text(text)
+    if not value:
+        return ""
+    twelve_hour = r"(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s?(?:AM|PM|am|pm)"
+    twenty_four = r"(?:[01]?\d|2[0-3]):[0-5]\d"
+    pattern = rf"(?:{twelve_hour}|{twenty_four})\s*(?:-|–|to|至|~)\s*(?:{twelve_hour}|{twenty_four})"
+    match = re.search(pattern, value)
+    return _normalize_text(match.group(0)) if match else ""
+
+
 def is_valid_opening_hours(text: str) -> bool:
     if not text:
         return False
@@ -143,6 +154,9 @@ def is_valid_opening_hours(text: str) -> bool:
 
     blocked_patterns = [r"\?q=", r"&sa=", r"&ved=", r"http", r"https", r"<[^>]+>"]
     if any(re.search(pat, value, re.IGNORECASE) for pat in blocked_patterns):
+        return False
+
+    if any(token in value for token in ['{"', '"}', '":', '",']):
         return False
 
     if _contains_price_or_ticket_tokens(value):
@@ -191,6 +205,10 @@ def clean_opening_hours(text: str) -> str:
     chunks = re.split(r"[\n;。]+", cleaned)
     for chunk in chunks:
         candidate = " ".join(chunk.split()).strip(" -|,。\t")
+        if _has_business_hours_label(candidate):
+            range_only = _extract_first_time_range(candidate)
+            if range_only and is_valid_opening_hours(range_only):
+                return range_only
         if is_valid_opening_hours(candidate):
             return candidate
     return ""
@@ -913,15 +931,21 @@ def resolve_ticket_price_with_gemini(
         title = _normalize_text(source.get("title"))
         link = _normalize_text(source.get("link"))
         snippet = _normalize_text(source.get("snippet"))
-        if not _looks_like_ticket_source(title, link, snippet):
-            continue
         source_type, source_score = _classify_source_type(title=title, link=link, snippet=snippet)
+        if not _looks_like_ticket_source(title, link, snippet) and source_type not in {
+            "official_homepage",
+            "official_visitor_info",
+            "official_faq",
+            "official_ticket_page",
+            "official_visitor_guide_pdf",
+        }:
+            continue
         if source_type in {"review_page", "generic_attraction_page"}:
             continue
         _debug_log(f"ticket_source_selected url={link} source_type={source_type} score={source_score}")
         page_text = _fetch_url_text(link)
         _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
-        if len(page_text) < 20 and source_type != "ota_product_page":
+        if len(page_text) < 20 and source_type not in {"ota_product_page", "official_homepage", "official_visitor_info", "official_faq"}:
             continue
         if len(page_text) < 40 and not snippet:
             continue
@@ -1724,6 +1748,7 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
                 text_blobs.append(_normalize_text(item.get("snippet")))
 
         preferred_sources = collect_preferred_sources(all_organic, min_count=3)
+        opening_hour_text_blobs: list[str] = []
         for src in preferred_sources:
             title = _normalize_text(src.get("title"))
             link = _normalize_text(src.get("link"))
@@ -1732,13 +1757,18 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
             _debug_log(
                 f"preferred_ticket_source url={link} source_type={source_type} score={source_score}"
             )
+            if source_type in {"official_ticket_page", "official_visitor_info", "official_faq", "official_homepage", "official_visitor_guide_pdf"}:
+                merged = f"{title}. {snippet}".strip()
+                if merged and not _contains_non_business_hours_tokens(merged):
+                    opening_hour_text_blobs.append(merged)
         merged_text = "\n".join(t for t in text_blobs if t)
+        opening_merged_text = "\n".join(opening_hour_text_blobs)
 
         if not result["opening_hours"]:
             result["opening_hours"] = (
                 _extract_hours_from_sources(preferred_sources)
                 or _extract_high_confidence_opening_hours_from_sources(preferred_sources)
-                or _extract_hours(merged_text)
+                or _extract_hours(opening_merged_text)
             )
             _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
