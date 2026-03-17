@@ -97,6 +97,42 @@ def _contains_price_or_ticket_tokens(text: str) -> bool:
     )
 
 
+def _contains_non_business_hours_tokens(text: str) -> bool:
+    value = _normalize_text(text)
+    if not value:
+        return False
+    return bool(
+        re.search(
+            r"address|street|jalan|road|avenue|lot\s*\d+|program|show|feeding|otter|exhibit|session|performance|schedule|itinerary|\|",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _has_business_hours_label(text: str) -> bool:
+    value = _normalize_text(text)
+    if not value:
+        return False
+    return bool(
+        re.search(
+            r"opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|daily\s*:",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _has_strict_time_range(text: str) -> bool:
+    value = _normalize_text(text)
+    if not value:
+        return False
+    twelve_hour = r"(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s?(?:AM|PM|am|pm)"
+    twenty_four = r"(?:[01]?\d|2[0-3]):[0-5]\d"
+    pattern = rf"(?:{twelve_hour}|{twenty_four})\s*(?:-|–|to|至|~)\s*(?:{twelve_hour}|{twenty_four})"
+    return bool(re.search(pattern, value))
+
+
 def is_valid_opening_hours(text: str) -> bool:
     if not text:
         return False
@@ -115,20 +151,8 @@ def is_valid_opening_hours(text: str) -> bool:
     if re.search(r"[A-Za-z0-9_-]{30,}", value):
         return False
 
-    has_time = bool(
-        re.search(
-            r"\b\d{1,2}:\d{2}\b|\b\d{1,2}\s?(?:AM|PM|am|pm)\b|\b(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\b",
-            value,
-            re.IGNORECASE,
-        )
-    )
-    has_time_range = bool(
-        re.search(
-            r"(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))",
-            value,
-            re.IGNORECASE,
-        )
-    )
+    has_time = bool(re.search(r"\b\d{1,2}:\d{2}\b|\b(?:0?[1-9]|1[0-2])\s?(?:AM|PM|am|pm)\b", value, re.IGNORECASE))
+    has_time_range = _has_strict_time_range(value)
     has_day_or_month = bool(
         re.search(
             r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun|January|February|March|April|May|June|July|August|September|October|November|December",
@@ -136,18 +160,22 @@ def is_valid_opening_hours(text: str) -> bool:
             re.IGNORECASE,
         )
     )
-    has_hours_keyword = bool(
-        re.search(r"opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|open|closed|营业时间|开放时间", value, re.IGNORECASE)
-    )
+    has_hours_keyword = bool(re.search(r"opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|daily\s*:|营业时间|开放时间", value, re.IGNORECASE))
 
     if re.search(r"\b\d+\s*(?:to|-)\s*\d+\s*hours?\b", value, re.IGNORECASE):
         return False
+    if _contains_non_business_hours_tokens(value):
+        return False
+    if re.search(r"(?:^|\s)00(?::00)?\s*am\b", value, re.IGNORECASE):
+        return False
 
-    if has_time_range:
+    if has_time_range and not _contains_non_business_hours_tokens(value):
+        return True
+    if has_hours_keyword and has_time_range:
         return True
     if has_time and has_hours_keyword:
         return True
-    if has_day_or_month and has_hours_keyword and has_time:
+    if has_day_or_month and has_time_range:
         return True
     return False
 
@@ -175,6 +203,13 @@ def _extract_hours_from_sources(sources: list[dict[str, str]]) -> str:
         merged = f"{title}. {snippet}"
         if _contains_price_or_ticket_tokens(merged):
             continue
+        source_type, score = _classify_source_type(title=title, link=_normalize_text(src.get("link")), snippet=snippet)
+        if source_type not in {"official_ticket_page", "official_visitor_info", "official_faq", "official_homepage"}:
+            continue
+        if score > 35:
+            continue
+        if not _has_business_hours_label(merged) and not re.search(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", merged, re.IGNORECASE):
+            continue
         candidate = clean_opening_hours(merged)
         if candidate:
             return candidate
@@ -186,14 +221,37 @@ def _extract_hours(text: str) -> str:
         return ""
 
     patterns = [
-        r"(?:opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|营业时间|开放时间)[:：]?\s*[^\n\.;]{4,120}",
-        r"(?:\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?\b[^\n]{0,120})?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至)\s?(?:\d{1,2}:\d{2}|\d{1,2}\s?(?:AM|PM|am|pm))",
+        r"(?:opening\s*hours|operating\s*hours|business\s*hours|open\s*daily|daily\s*:|营业时间|开放时间)[:：]?\s*[^\n\.;]{4,120}",
+        r"(?:\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?\b[^\n]{0,120})(?:[01]?\d:[0-5]\d|(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s?(?:AM|PM|am|pm))\s?(?:-|–|to|至|~)\s?(?:[01]?\d:[0-5]\d|(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s?(?:AM|PM|am|pm))",
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             candidate = clean_opening_hours(match.group(0))
             if candidate:
                 return candidate
+    return ""
+
+
+def _extract_high_confidence_opening_hours_from_sources(sources: list[dict[str, str]]) -> str:
+    for src in sources:
+        title = _normalize_text(src.get("title"))
+        link = _normalize_text(src.get("link"))
+        snippet = _normalize_text(src.get("snippet"))
+        source_type, score = _classify_source_type(title=title, link=link, snippet=snippet)
+        if source_type not in {"official_ticket_page", "official_visitor_info", "official_faq", "official_homepage", "official_visitor_guide_pdf"}:
+            continue
+        if score > 35:
+            continue
+
+        page_text = _fetch_url_text(link)
+        _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
+        if len(page_text) < 100:
+            continue
+
+        candidate = _extract_hours(page_text)
+        if candidate:
+            return candidate
+
     return ""
 
 
@@ -550,29 +608,43 @@ def _looks_like_ticket_source(title: str, link: str, snippet: str) -> bool:
     return any(token in corpus for token in wanted)
 
 
-def _ticket_source_priority(title: str, link: str, snippet: str) -> int:
+def _classify_source_type(title: str, link: str, snippet: str) -> tuple[str, int]:
     corpus = f"{title} {link} {snippet}".lower()
     domain = _extract_domain(link)
 
-    official_like = any(
-        token in domain for token in [".gov", ".edu", "official", "tourism", "hillrailway", "penanghill"]
-    )
-    has_ticket_intent = any(
-        token in corpus for token in ["ticket", "admission", "pricing", "rates", "entry fee", "price", "/ticket", "/admission", "/pricing", "/rates"]
-    )
-    has_info_intent = any(token in corpus for token in ["faq", "visitor information", "visitor info", "facilities"])
+    official_like = any(token in domain for token in [".gov", ".edu", "official", "tourism", "penanghill", "hillrailway", "mypenang"]) or "official" in corpus
     is_pdf = ".pdf" in corpus
-    third_party = any(token in corpus for token in ["klook", "trip.com", "kkday", "booking", "traveloka", "tripadvisor"])
+    has_ticket_intent = any(token in corpus for token in ["ticket", "admission", "pricing", "rates", "entry fee", "fare"])
+    has_hours_intent = any(token in corpus for token in ["opening hours", "operating hours", "business hours", "open daily"])
+    has_faq_intent = "faq" in corpus
+    has_visitor_intent = any(token in corpus for token in ["visitor information", "visitor info", "visit info", "facilities"])
+    is_review = any(token in corpus for token in ["review", "reviews", "tripadvisor.com/attraction_review", "rating"])
+    is_ota = any(token in corpus for token in ["klook", "trip.com", "kkday", "booking", "traveloka", "viator", "getyourguide"])
 
-    if official_like and (has_ticket_intent or is_pdf):
-        return 10
-    if official_like and has_info_intent:
-        return 20
+    if official_like and has_ticket_intent:
+        return "official_ticket_page", 10
+    if official_like and is_pdf:
+        return "official_visitor_guide_pdf", 12
+    if official_like and has_faq_intent:
+        return "official_faq", 20
+    if official_like and has_visitor_intent:
+        return "official_visitor_info", 24
+    if official_like and has_hours_intent:
+        return "official_visitor_info", 24
     if official_like:
-        return 30
-    if third_party:
-        return 40
-    return 50
+        return "official_homepage", 30
+    if has_ticket_intent and not is_review:
+        return "ota_product_page", 42
+    if is_ota and has_ticket_intent:
+        return "ota_product_page", 42
+    if is_review:
+        return "review_page", 55
+    return "generic_attraction_page", 50
+
+
+def _ticket_source_priority(title: str, link: str, snippet: str) -> int:
+    _, score = _classify_source_type(title=title, link=link, snippet=snippet)
+    return score
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -618,7 +690,7 @@ def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[
         full = m.group(0)
         context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
 
-        if any(token in context for token in ["from", "starting", "start at", "package", "vary", "contact us"]):
+        if any(token in context for token in ["from", "starting", "start at", "package", "vary", "contact us", "from rm", "starting at"]):
             continue
 
         positive_score = 0
@@ -628,17 +700,17 @@ def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[
             positive_score += 1
 
         negative_score = 0
-        if any(token in context for token in ["child", "children", "kid", "senior", "student"]):
+        if any(token in context for token in ["child", "children", "kid", "senior", "student", "foreigner", "non-malaysian"]):
             negative_score += 1
-        if any(token in context for token in ["package", "combo", "add-on", "addon", "express lane"]):
+        if any(token in context for token in ["package", "combo", "add-on", "addon", "express lane", "bundle", "combo deal"]):
             negative_score += 2
-        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "funicular package"]):
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "funicular package", "sub-attraction", "exhibit"]):
             negative_score += 2
 
         if attraction_name and attraction_name.lower() not in lowered_text and "general admission" not in lowered_text:
             negative_score += 1
 
-        if positive_score - negative_score < 0:
+        if positive_score - negative_score <= 0:
             continue
 
         try:
@@ -649,13 +721,13 @@ def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[
 
     for m in re.finditer(r"(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:-|–|to|~|～)\s*(?:RM|MYR)?\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.IGNORECASE):
         context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
-        if any(token in context for token in ["from", "starting", "package", "vary", "contact us"]):
+        if any(token in context for token in ["from", "starting", "package", "vary", "contact us", "starting at", "from rm"]):
             continue
-        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon"]):
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon", "combo", "bundle"]):
             continue
 
         positive_score = 0
-        if any(token in context for token in ["adult", "general", "admission", "entry", "standard"]):
+        if any(token in context for token in ["adult", "general", "admission", "entry", "standard", "normal lane"]):
             positive_score += 2
         if any(token in context for token in ["ticket", "price", "rate", "fare"]):
             positive_score += 1
@@ -671,9 +743,9 @@ def _extract_strong_ticket_values(text: str, attraction_name: str = "") -> list[
 
     for m in re.finditer(r"\$\s*([0-9]+(?:\.[0-9]{1,2})?)(?:\s*(?:-|–|to|~|～)\s*\$?\s*([0-9]+(?:\.[0-9]{1,2})?))?", text):
         context = lowered_text[max(0, m.start() - 100) : m.end() + 100]
-        if any(token in context for token in ["from", "starting", "package", "vary", "contact us"]):
+        if any(token in context for token in ["from", "starting", "package", "vary", "contact us", "starting at", "from $"]):
             continue
-        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon"]):
+        if any(token in context for token in ["the habitat", "habitat", "canopy walk", "add-on", "addon", "review", "rating"]):
             continue
 
         positive_score = 0
@@ -743,17 +815,23 @@ def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_
         snippet = _normalize_text(src.get("snippet"))
         if not _looks_like_ticket_source(title, link, snippet):
             continue
-        ranked.append((_ticket_source_priority(title, link, snippet), title, link, snippet))
+        source_type, score = _classify_source_type(title=title, link=link, snippet=snippet)
+        if source_type in {"review_page", "generic_attraction_page"}:
+            continue
+        ranked.append((score, source_type, title, link, snippet))
 
     ranked.sort(key=lambda x: x[0])
     all_values: list[dict[str, Any]] = []
-    for _, title, link, snippet in ranked[:8]:
+    for _, source_type, title, link, snippet in ranked[:8]:
         combined = f"{title} {snippet}".strip()
-        all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
+        if source_type != "review_page":
+            all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
 
         page_text = _fetch_url_text(link)
-        if page_text:
+        if page_text and len(page_text) >= 20:
             all_values.extend(_extract_strong_ticket_values(page_text, attraction_name=attraction_name))
+        elif source_type == "ota_product_page" and combined:
+            all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
 
         picked = _pick_ticket_price_from_values(all_values)
         if picked:
@@ -837,12 +915,17 @@ def resolve_ticket_price_with_gemini(
         snippet = _normalize_text(source.get("snippet"))
         if not _looks_like_ticket_source(title, link, snippet):
             continue
-        _debug_log(f"ticket_source_selected url={link} source_type={_ticket_source_priority(title, link, snippet)}")
+        source_type, source_score = _classify_source_type(title=title, link=link, snippet=snippet)
+        if source_type in {"review_page", "generic_attraction_page"}:
+            continue
+        _debug_log(f"ticket_source_selected url={link} source_type={source_type} score={source_score}")
         page_text = _fetch_url_text(link)
         _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
-        if not page_text and not snippet:
+        if len(page_text) < 20 and source_type != "ota_product_page":
             continue
-        ranked_sources.append((_ticket_source_priority(title, link, snippet), source, page_text))
+        if len(page_text) < 40 and not snippet:
+            continue
+        ranked_sources.append((source_score, {**source, "_source_type": source_type}, page_text))
 
     if not ranked_sources:
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
@@ -854,10 +937,11 @@ def resolve_ticket_price_with_gemini(
         title = _normalize_text(source.get("title"))
         link = _normalize_text(source.get("link"))
         snippet = _normalize_text(source.get("snippet"))
+        source_type = _normalize_text(source.get("_source_type")) or str(priority)
         source_entries.append(
             {
                 "source_url": link,
-                "source_type": str(priority),
+                "source_type": source_type,
                 "title": title,
                 "snippet": snippet,
                 "content": page_text[:2200],
@@ -1644,13 +1728,18 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
             title = _normalize_text(src.get("title"))
             link = _normalize_text(src.get("link"))
             snippet = _normalize_text(src.get("snippet"))
+            source_type, source_score = _classify_source_type(title=title, link=link, snippet=snippet)
             _debug_log(
-                f"preferred_ticket_source url={link} source_type={_ticket_source_priority(title, link, snippet)}"
+                f"preferred_ticket_source url={link} source_type={source_type} score={source_score}"
             )
         merged_text = "\n".join(t for t in text_blobs if t)
 
         if not result["opening_hours"]:
-            result["opening_hours"] = _extract_hours_from_sources(preferred_sources) or _extract_hours(merged_text)
+            result["opening_hours"] = (
+                _extract_hours_from_sources(preferred_sources)
+                or _extract_high_confidence_opening_hours_from_sources(preferred_sources)
+                or _extract_hours(merged_text)
+            )
             _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
             strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
