@@ -665,6 +665,25 @@ def _ticket_source_priority(title: str, link: str, snippet: str) -> int:
     return score
 
 
+def _is_strong_ticket_source_type(source_type: str) -> bool:
+    return source_type in {
+        "official_ticket_page",
+        "official_visitor_guide_pdf",
+        "ota_product_page",
+    }
+
+
+def _has_strong_ticket_source_evidence(sources: list[dict[str, str]]) -> bool:
+    for src in sources:
+        title = _normalize_text(src.get("title"))
+        link = _normalize_text(src.get("link"))
+        snippet = _normalize_text(src.get("snippet"))
+        source_type, _ = _classify_source_type(title=title, link=link, snippet=snippet)
+        if _is_strong_ticket_source_type(source_type):
+            return True
+    return False
+
+
 def _extract_text_from_html(html: str) -> str:
     text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
@@ -1665,7 +1684,11 @@ def _is_cache_entry_usable(entry: dict[str, Any]) -> bool:
 
 
 
-def get_attraction_info(attraction_name: str, location: str | None = None) -> dict[str, Any]:
+def get_attraction_info(
+    attraction_name: str,
+    location: str | None = None,
+    enrichment_mode: str = "detail",
+) -> dict[str, Any]:
     attraction_name = attraction_name.strip()
     result: dict[str, Any] = {
         "query_type": "attraction_info",
@@ -1772,33 +1795,41 @@ def get_attraction_info(attraction_name: str, location: str | None = None) -> di
             )
             _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
-            strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
-            _debug_log(f"rule_based_price={strong_price}")
-            gemini_price = resolve_ticket_price_with_gemini(
-                attraction_name=attraction_name,
-                location=location,
-                sources=preferred_sources,
-                rule_based_price=strong_price,
-            )
-            gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
-            if gemini_ticket_price:
-                result["ticket_price"] = gemini_ticket_price
-                result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
-                result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
-                _debug_log("ticket_price_path=gemini")
-            elif strong_price:
-                result["ticket_price"] = strong_price
-                result["price_type"] = "exact" if "–" not in strong_price else "range"
-                result["price_note"] = "Parsed from ticket-related source content"
-                _debug_log("ticket_price_path=rule_based_fallback")
+            has_strong_ticket_sources = _has_strong_ticket_source_evidence(preferred_sources)
+            if enrichment_mode == "recommendation" and not has_strong_ticket_sources:
+                _debug_log("ticket_price_enrichment=skipped_due_to_weak_sources")
+                result["ticket_price"] = ""
+                result["price_type"] = "unknown"
+                result["price_note"] = "Skipped in recommendation mode due to weak ticket sources."
             else:
-                price_candidates = _collect_price_candidates_from_sources(preferred_sources)
-                _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
-                price_resolution = resolve_ticket_price(price_candidates)
-                result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
-                result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
-                result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
-                _debug_log("ticket_price_path=legacy_fallback")
+                _debug_log("ticket_price_enrichment=attempted_due_to_strong_ticket_sources")
+                strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
+                _debug_log(f"rule_based_price={strong_price}")
+                gemini_price = resolve_ticket_price_with_gemini(
+                    attraction_name=attraction_name,
+                    location=location,
+                    sources=preferred_sources,
+                    rule_based_price=strong_price,
+                )
+                gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
+                if gemini_ticket_price:
+                    result["ticket_price"] = gemini_ticket_price
+                    result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
+                    result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
+                    _debug_log("ticket_price_path=gemini")
+                elif strong_price:
+                    result["ticket_price"] = strong_price
+                    result["price_type"] = "exact" if "–" not in strong_price else "range"
+                    result["price_note"] = "Parsed from ticket-related source content"
+                    _debug_log("ticket_price_path=rule_based_fallback")
+                else:
+                    price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+                    _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
+                    price_resolution = resolve_ticket_price(price_candidates)
+                    result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
+                    result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
+                    result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
+                    _debug_log("ticket_price_path=legacy_fallback")
 
         if not result["image_url"]:
             try:

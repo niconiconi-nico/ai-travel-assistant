@@ -214,7 +214,7 @@ def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
             continue
         seen_names.add(key)
 
-        detail = get_attraction_info(attraction_name=name, location=city)
+        detail = get_attraction_info(attraction_name=name, location=city, enrichment_mode="recommendation")
         detail_sources = detail.get("sources", []) if isinstance(detail, dict) else []
         if isinstance(detail_sources, list):
             for src in detail_sources:
