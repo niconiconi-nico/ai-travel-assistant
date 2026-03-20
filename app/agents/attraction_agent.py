@@ -176,6 +176,11 @@ def _clean_candidate_name(name: str) -> str:
         r"游览观光|遊覽觀光",
         r"top\s*\d+",
         r"best attractions",
+        r"tourist attractions",
+        r"must-see attractions|must see attractions|must visit attractions",
+        r"discover the",
+        r"beautiful sights|sights\s*&\s*attractions|sights\s+and\s+attractions",
+        r"guide to|where to go|what to do|nearby attractions",
         r"景点玩乐|景點玩樂",
         r"washington|華盛頓",
     ]

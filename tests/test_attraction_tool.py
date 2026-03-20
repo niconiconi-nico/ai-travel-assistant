@@ -657,3 +657,46 @@ def test_recommendation_mode_attempts_ticket_enrichment_for_strong_sources(monke
 
     assert result["ticket_price"] == "RM 30"
     assert called["gemini"] == 1
+
+
+
+def test_debug_logging_disabled_by_default(monkeypatch, capsys):
+    monkeypatch.delenv("ATTRACTION_TOOL_DEBUG", raising=False)
+
+    attraction_tool._debug_log("hidden-message")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+
+def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=14: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "organic_results": [
+                {
+                    "title": "Discover the 11 most beautiful sights & attractions in Beijing",
+                    "link": "https://example.com/discover-beijing",
+                    "snippet": "Generic list article.",
+                },
+                {
+                    "title": "Temple of Heaven Park - Beijing Travel",
+                    "link": "https://example.com/temple-of-heaven",
+                    "snippet": "Historic imperial complex in Beijing.",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+
+    result = attraction_tool.get_attractions_by_place("Beijing")
+
+    assert [item["name"] for item in result] == ["Temple of Heaven Park"]

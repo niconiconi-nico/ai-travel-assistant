@@ -58,8 +58,13 @@ _FIXED_EXCHANGE_RATES: dict[str, float] = {
 }
 
 
+def _debug_enabled() -> bool:
+    return os.getenv("ATTRACTION_TOOL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _debug_log(message: str) -> None:
-    print(f"[attraction_tool][debug] {message}")
+    if _debug_enabled():
+        print(f"[attraction_tool][debug] {message}")
 
 
 def _normalize_text(value: Any) -> str:
@@ -1380,25 +1385,58 @@ def _enrich_poi_with_knowledge(poi: dict[str, Any], location: str | None = None)
     return enriched
 
 def _is_plausible_attraction_name(name: str) -> bool:
-    text = name.strip()
+    text = re.sub(r"\s+", " ", name).strip(" -|,:;。.!?[](){}")
     if len(text) < 3:
         return False
+
+    lowered = text.lower()
     bad_tokens = [
         "things to do",
         "best attractions",
-        "tripadvisor",
-        "wikipedia",
+        "top attractions",
+        "tourist attractions",
+        "must-see attractions",
+        "must visit attractions",
+        "sights & attractions",
+        "sights and attractions",
+        "discover the",
+        "travel guide",
         "official site",
-        "guide",
+        "wikipedia",
+        "tripadvisor",
         "攻略",
         "门票",
         "票价",
     ]
-    lowered = text.lower()
     if any(token in lowered for token in bad_tokens):
         return False
+
+    generic_patterns = [
+        r"^top\s+\d+",
+        r"^\d+\s+(best|top|beautiful|must-see|must visit)",
+        r"most beautiful",
+        r"beautiful sights",
+        r"what to do",
+        r"where to go",
+        r"visit .* in ",
+        r"attractions? in ",
+        r"guide to",
+        r"nearby",
+    ]
+    if any(re.search(pattern, lowered) for pattern in generic_patterns):
+        return False
+
     if re.search(r"\b\d{4}\b", text):
         return False
+
+    meaningful_tokens = [
+        "museum", "temple", "palace", "park", "garden", "tower", "hill", "wall", "lake", "street",
+        "market", "jetty", "mosque", "church", "cathedral", "fort", "village", "zoo", "aquarium",
+        "博物院", "博物馆", "公园", "寺", "寺庙", "故宫", "长城", "胡同", "广场", "乐园", "古城", "山", "湖",
+    ]
+    if not any(token in lowered or token in text for token in meaningful_tokens) and len(text.split()) > 8:
+        return False
+
     return True
 
 
@@ -1530,7 +1568,7 @@ def normalize_recommendations_with_gemini(
     for item in parsed:
         name = _normalize_text(item.get("name"))
         base = by_name.get(name.lower())
-        if not name or not base:
+        if not name or not base or not _is_plausible_attraction_name(name):
             continue
 
         final_image = _normalize_text(item.get("image"))
