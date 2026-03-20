@@ -1,10 +1,132 @@
 from importlib import import_module
 from importlib.util import find_spec
+import json
 import os
+from datetime import date, datetime, time, timedelta
 
 from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+
+
+TRAVEL_ATTRACTION_CATALOG = {
+    "bangkok": [
+        {
+            "name": "The Grand Palace",
+            "location": "Phra Nakhon, Bangkok",
+            "information": "泰国皇室地标，建筑华丽",
+            "price": 500.00,
+            "open_time": "08:30-15:30",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Grand_Palace_Bangkok.jpg",
+        },
+        {
+            "name": "Wat Pho",
+            "location": "Phra Nakhon, Bangkok",
+            "information": "卧佛闻名，寺院历史悠久",
+            "price": 300.00,
+            "open_time": "08:00-18:30",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/1/1e/Wat_Pho_Bangkok.jpg",
+        },
+        {
+            "name": "Wat Arun",
+            "location": "Bangkok Yai, Bangkok",
+            "information": "郑王庙临河，夕景迷人",
+            "price": 200.00,
+            "open_time": "08:00-18:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "16:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Wat_Arun_Bangkok.jpg",
+        },
+        {
+            "name": "Jim Thompson House Museum",
+            "location": "Pathum Wan, Bangkok",
+            "information": "泰丝名宅，艺术氛围浓厚",
+            "price": 200.00,
+            "open_time": "10:00-18:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "10:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/9/95/Jim_Thompson_House.jpg",
+        },
+        {
+            "name": "Chatuchak Weekend Market",
+            "location": "Chatuchak, Bangkok",
+            "information": "大型市集，购物美食丰富",
+            "price": 0.00,
+            "open_time": "09:00-18:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "14:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/d/d5/Chatuchak_Market_Bangkok.jpg",
+        },
+    ],
+    "pattaya": [
+        {
+            "name": "Sanctuary of Truth",
+            "location": "Na Kluea, Pattaya",
+            "information": "全木雕神殿，工艺震撼",
+            "price": 500.00,
+            "open_time": "08:00-18:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "09:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/82/Sanctuary_of_Truth_Pattaya.jpg",
+        },
+        {
+            "name": "Nong Nooch Tropical Garden",
+            "location": "Sattahip, Pattaya",
+            "information": "热带园林秀，亲子热门",
+            "price": 600.00,
+            "open_time": "08:00-18:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/0/06/Nong_Nooc_Tropical_Garden.jpg",
+        },
+        {
+            "name": "Pattaya Floating Market",
+            "location": "Bang Lamung, Pattaya",
+            "information": "水上市集，体验泰式风情",
+            "price": 200.00,
+            "open_time": "09:00-19:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "10:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/2/22/Pattaya_Floating_Market.jpg",
+        },
+        {
+            "name": "Big Buddha Temple",
+            "location": "South Pattaya, Pattaya",
+            "information": "山顶大佛，俯瞰芭堤雅湾",
+            "price": 100.00,
+            "open_time": "07:00-19:00",
+            "suggested_duration_hours": 1,
+            "preferred_start_time": "16:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/7/71/Wat_Phra_Yai_Pattaya.jpg",
+        },
+        {
+            "name": "Art in Paradise Pattaya",
+            "location": "North Pattaya, Pattaya",
+            "information": "互动3D美术馆，拍照有趣",
+            "price": 400.00,
+            "open_time": "09:00-21:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/9/92/Art_in_Paradise_Pattaya.jpg",
+        },
+    ],
+}
+
+
+FALLBACK_ATTRACTION = {
+    "name": "City Landmark Tour",
+    "location": "Central District",
+    "information": "经典城市地标，轻松游览",
+    "price": 300.00,
+    "open_time": "09:00-17:00",
+    "suggested_duration_hours": 2,
+    "preferred_start_time": "10:00",
+    "image": "https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg",
+}
 
 
 def _load_geopy_modules():
@@ -19,6 +141,139 @@ def _load_geopy_modules():
         return None, None
 
     return getattr(geocoders_module, "Nominatim", None), getattr(distance_module, "geodesic", None)
+
+
+def _parse_json_query(query: str) -> dict:
+    if isinstance(query, dict):
+        return query
+
+    text = str(query or "").strip()
+    if not text:
+        return {}
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def _safe_parse_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_city_key(city: str) -> str:
+    return str(city or "").strip().lower()
+
+
+def _trip_dates(start_date: date, end_date: date) -> list[date]:
+    day_count = (end_date - start_date).days + 1
+    return [start_date + timedelta(days=offset) for offset in range(max(day_count, 0))]
+
+
+def _parse_hour_minute(value: str) -> tuple[int, int]:
+    hour_text, minute_text = value.split(":", 1)
+    return int(hour_text), int(minute_text)
+
+
+def _combine_datetime(day: date, hour_text: str) -> datetime:
+    hour, minute = _parse_hour_minute(hour_text)
+    return datetime.combine(day, time(hour=hour, minute=minute))
+
+
+def _format_duration(hours: int) -> str:
+    return f"{hours} hour" if hours == 1 else f"{hours} hours"
+
+
+def _build_view(day: date, attraction: dict) -> dict:
+    open_start, open_end = attraction["open_time"].split("-", 1)
+    arrival_time = _combine_datetime(day, attraction["preferred_start_time"])
+    open_start_time = _combine_datetime(day, open_start)
+    open_end_time = _combine_datetime(day, open_end)
+
+    if arrival_time < open_start_time:
+        arrival_time = open_start_time
+
+    duration_hours = int(attraction["suggested_duration_hours"])
+    departure_time = arrival_time + timedelta(hours=duration_hours)
+    if departure_time > open_end_time:
+        departure_time = open_end_time
+        adjusted_hours = max(1, int((departure_time - arrival_time).total_seconds() // 3600))
+        duration_hours = adjusted_hours
+        arrival_time = departure_time - timedelta(hours=duration_hours)
+        if arrival_time < open_start_time:
+            arrival_time = open_start_time
+            departure_time = min(arrival_time + timedelta(hours=duration_hours), open_end_time)
+
+    duration_hours = max(1, int((departure_time - arrival_time).total_seconds() // 3600) or duration_hours)
+
+    return {
+        "name": attraction["name"],
+        "location": attraction["location"],
+        "information": attraction["information"],
+        "price": float(f"{float(attraction['price']):.2f}"),
+        "open_time": attraction["open_time"],
+        "arrival_time": arrival_time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "departure_time": departure_time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "visit_duration": _format_duration(duration_hours),
+        "image": attraction["image"],
+    }
+
+
+def _attractions_for_city(city: str) -> list[dict]:
+    catalog = TRAVEL_ATTRACTION_CATALOG.get(_normalize_city_key(city), [])
+    if catalog:
+        return [dict(item) for item in catalog]
+
+    fallback = dict(FALLBACK_ATTRACTION)
+    fallback["name"] = f"{city} City Landmark Tour" if city else fallback["name"]
+    fallback["location"] = f"Central District, {city}" if city else fallback["location"]
+    return [fallback]
+
+
+def _build_structured_travel_plan(query: str) -> dict:
+    payload = _parse_json_query(query)
+    cities = [str(city).strip() for city in payload.get("cities", []) if str(city).strip()]
+    start_date = _safe_parse_date(payload.get("start_date"))
+    end_date = _safe_parse_date(payload.get("end_date"))
+
+    if not cities or not start_date or not end_date or end_date < start_date:
+        return {"views": []}
+
+    trip_days = _trip_dates(start_date, end_date)
+    if not trip_days:
+        return {"views": []}
+
+    city_sequences: list[str] = []
+    if len(cities) >= len(trip_days):
+        city_sequences = cities[: len(trip_days)]
+    else:
+        base_days = len(trip_days) // len(cities)
+        extra_days = len(trip_days) % len(cities)
+        for index, city in enumerate(cities):
+            assigned_days = base_days + (1 if index < extra_days else 0)
+            city_sequences.extend([city] * assigned_days)
+
+    views: list[dict] = []
+    city_offsets: dict[str, int] = {}
+    for day, city in zip(trip_days, city_sequences):
+        attractions = _attractions_for_city(city)
+        planned_count = min(2, len(attractions))
+        start_index = city_offsets.get(city, 0)
+        selected_attractions: list[dict] = []
+        for offset in range(planned_count):
+            attraction_index = (start_index + offset) % len(attractions)
+            selected_attractions.append(attractions[attraction_index])
+        city_offsets[city] = start_index + planned_count
+        selected_attractions.sort(key=lambda item: item["preferred_start_time"])
+        for attraction in selected_attractions:
+            views.append(_build_view(day, attraction))
+
+    return {"views": views}
 
 
 @tool
@@ -36,7 +291,7 @@ def get_location_info(place: str) -> str:
         # 使用 Nominatim（OpenStreetMap）不需要 Key，但需要设置 user_agent
         geolocator = nominatim_cls(user_agent="ai_travel_agent")
         location = geolocator.geocode(place)
-        
+
         if location:
             return f"地点：{place}\n地址：{location.address}\n坐标：({location.latitude}, {location.longitude})"
         else:
@@ -60,7 +315,7 @@ def calculate_distance(place_a: str, place_b: str) -> str:
         geolocator = nominatim_cls(user_agent="ai_travel_agent")
         loc_a = geolocator.geocode(place_a)
         loc_b = geolocator.geocode(place_b)
-        
+
         if loc_a and loc_b:
             coords_a = (loc_a.latitude, loc_a.longitude)
             coords_b = (loc_b.latitude, loc_b.longitude)
@@ -75,10 +330,14 @@ def calculate_distance(place_a: str, place_b: str) -> str:
 @tool
 def travel_planner(query: str) -> str:
     """
-    旅行规划工具：根据用户输入生成基础行程规划
-    - 输入：目的地、天数、预算、偏好等
-    - 输出：包含「行程规划」「每天安排」「简要预算建议」
+    旅行规划工具：根据 JSON 输入生成严格 JSON 行程规划
+    - 输入：包含 cities/start_date/end_date/travelers 的 JSON 字符串
+    - 输出：{"views":[...]} JSON 字符串
     """
+    payload = _parse_json_query(query)
+    if {"cities", "start_date", "end_date"}.issubset(payload.keys()):
+        return json.dumps(_build_structured_travel_plan(payload), ensure_ascii=False)
+
     provider = os.getenv("LLM_PROVIDER", "").lower()
     if provider == "google" or os.getenv("GOOGLE_API_KEY"):
         llm = ChatGoogleGenerativeAI(
@@ -94,7 +353,6 @@ def travel_planner(query: str) -> str:
             temperature=0.2,
         )
 
-    # 统一中文结构输出，便于阅读与后续扩展
     prompt = f"""
 你是一位专业旅行规划师，请根据以下用户需求生成一个简洁易读的旅行方案：
 用户需求：{query}
