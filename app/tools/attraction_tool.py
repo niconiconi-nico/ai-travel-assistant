@@ -20,18 +20,19 @@ _EXACT_PRICE_PATTERNS = [
     r"(?:RM|MYR)\s+\d+(?:[\.,]\d{1,2})?",
     r"USD\s+\d+(?:[\.,]\d{1,2})?",
     r"\$\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:THB|฿)\s?\d+(?:[\.,]\d{1,2})?",
     r"(?:CNY|RMB)\s+\d+(?:[\.,]\d{1,2})?",
     r"(?:CNY|RMB)\s*\d+(?:[\.,]\d{1,2})?\s*元?",
     r"[¥]\s?\d+(?:[\.,]\d{1,2})?",
     r"\d+(?:[\.,]\d{1,2})?\s*元",
 ]
 _FROM_PRICE_PATTERNS = [
-    r"(?:from|starting\s+from|adult\s+ticket)\s*(?:at\s*)?(?:RM|MYR|USD|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?",
-    r"(?:成人票|起价|起)\s*(?:RM|MYR|USD|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:from|starting\s+from|adult\s+ticket)\s*(?:at\s*)?(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:成人票|起价|起)\s*(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
 ]
 _RANGE_PRICE_PATTERNS = [
-    r"(?:RM|MYR|USD|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?(?:RM|MYR|USD|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
-    r"\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?\d+(?:[\.,]\d{1,2})?\s?(?:元|RMB|CNY|¥|RM|MYR|USD)",
+    r"(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
+    r"\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?\d+(?:[\.,]\d{1,2})?\s?(?:元|RMB|CNY|¥|RM|MYR|USD|THB|฿)",
 ]
 _FREE_PRICE_PATTERNS = [r"\bfree\b", r"free\s+entry", r"possibly\s+free", r"免票", r"免费"]
 
@@ -51,6 +52,8 @@ _PLATFORM_PRIORITIES = {
 _FIXED_EXCHANGE_RATES: dict[str, float] = {
     "MYR": 1.0,
     "RM": 1.0,
+    "THB": 0.13,
+    "฿": 0.13,
     "CNY": 0.65,
     "RMB": 0.65,
     "USD": 4.70,
@@ -484,6 +487,8 @@ def _normalize_currency(value: str) -> str:
         return "USD"
     if "USD" in upper:
         return "USD"
+    if "THB" in upper or "฿" in value:
+        return "THB"
     if "CNY" in upper or "RMB" in upper:
         return "CNY"
     if "元" in value:
@@ -630,7 +635,7 @@ def _is_valid_price_text(value: str) -> bool:
     if not re.search(r"\d", value):
         return False
 
-    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bCNY\b|\bRMB\b|\bEUR\b|\bSGD\b|\bJPY\b|\bGBP\b|¥)", value, re.IGNORECASE)
+    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bTHB\b|\bCNY\b|\bRMB\b|\bEUR\b|\bSGD\b|\bJPY\b|\bGBP\b|¥|฿)", value, re.IGNORECASE)
     return bool(has_currency)
 
 

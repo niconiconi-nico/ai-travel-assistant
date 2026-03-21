@@ -47,7 +47,7 @@ def test_travel_planner_returns_strict_json_for_trip_payload():
     assert first_view["name"] == "The Grand Palace"
     assert first_view["location"] == "Phra Nakhon, Bangkok"
     assert first_view["information"] == "泰国皇室地标，建筑华丽"
-    assert first_view["price"] == 500.0
+    assert first_view["price"] == 65.0
     assert first_view["open_time"] == "08:30-15:30"
     assert first_view["visit_duration"] == "3 hours"
     assert first_view["image"].startswith("http")

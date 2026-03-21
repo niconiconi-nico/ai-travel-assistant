@@ -16,6 +16,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Phra Nakhon, Bangkok",
             "information": "泰国皇室地标，建筑华丽",
             "price": 500.00,
+            "currency": "THB",
             "open_time": "08:30-15:30",
             "suggested_duration_hours": 3,
             "preferred_start_time": "09:00",
@@ -26,6 +27,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Phra Nakhon, Bangkok",
             "information": "卧佛闻名，寺院历史悠久",
             "price": 300.00,
+            "currency": "THB",
             "open_time": "08:00-18:30",
             "suggested_duration_hours": 2,
             "preferred_start_time": "13:00",
@@ -36,6 +38,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Bangkok Yai, Bangkok",
             "information": "郑王庙临河，夕景迷人",
             "price": 200.00,
+            "currency": "THB",
             "open_time": "08:00-18:00",
             "suggested_duration_hours": 2,
             "preferred_start_time": "16:00",
@@ -46,6 +49,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Pathum Wan, Bangkok",
             "information": "泰丝名宅，艺术氛围浓厚",
             "price": 200.00,
+            "currency": "THB",
             "open_time": "10:00-18:00",
             "suggested_duration_hours": 2,
             "preferred_start_time": "10:30",
@@ -56,6 +60,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Chatuchak, Bangkok",
             "information": "大型市集，购物美食丰富",
             "price": 0.00,
+            "currency": "THB",
             "open_time": "09:00-18:00",
             "suggested_duration_hours": 3,
             "preferred_start_time": "14:00",
@@ -68,6 +73,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Na Kluea, Pattaya",
             "information": "全木雕神殿，工艺震撼",
             "price": 500.00,
+            "currency": "THB",
             "open_time": "08:00-18:00",
             "suggested_duration_hours": 3,
             "preferred_start_time": "09:30",
@@ -78,6 +84,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Sattahip, Pattaya",
             "information": "热带园林秀，亲子热门",
             "price": 600.00,
+            "currency": "THB",
             "open_time": "08:00-18:00",
             "suggested_duration_hours": 3,
             "preferred_start_time": "13:00",
@@ -88,6 +95,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "Bang Lamung, Pattaya",
             "information": "水上市集，体验泰式风情",
             "price": 200.00,
+            "currency": "THB",
             "open_time": "09:00-19:00",
             "suggested_duration_hours": 2,
             "preferred_start_time": "10:00",
@@ -98,6 +106,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "South Pattaya, Pattaya",
             "information": "山顶大佛，俯瞰芭堤雅湾",
             "price": 100.00,
+            "currency": "THB",
             "open_time": "07:00-19:00",
             "suggested_duration_hours": 1,
             "preferred_start_time": "16:00",
@@ -108,6 +117,7 @@ TRAVEL_ATTRACTION_CATALOG = {
             "location": "North Pattaya, Pattaya",
             "information": "互动3D美术馆，拍照有趣",
             "price": 400.00,
+            "currency": "THB",
             "open_time": "09:00-21:00",
             "suggested_duration_hours": 2,
             "preferred_start_time": "13:30",
@@ -122,10 +132,17 @@ FALLBACK_ATTRACTION = {
     "location": "Central District",
     "information": "经典城市地标，轻松游览",
     "price": 300.00,
+    "currency": "MYR",
     "open_time": "09:00-17:00",
     "suggested_duration_hours": 2,
     "preferred_start_time": "10:00",
     "image": "https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg",
+}
+
+_PLANNER_EXCHANGE_RATES = {
+    "MYR": 1.0,
+    "RM": 1.0,
+    "THB": 0.13,
 }
 
 
@@ -189,6 +206,11 @@ def _format_duration(hours: int) -> str:
     return f"{hours} hour" if hours == 1 else f"{hours} hours"
 
 
+def _convert_planner_price_to_myr(price: float, currency: str) -> float:
+    rate = _PLANNER_EXCHANGE_RATES.get(str(currency or "").upper(), 1.0)
+    return float(f"{float(price) * rate:.2f}")
+
+
 def _build_view(day: date, attraction: dict) -> dict:
     open_start, open_end = attraction["open_time"].split("-", 1)
     arrival_time = _combine_datetime(day, attraction["preferred_start_time"])
@@ -210,12 +232,13 @@ def _build_view(day: date, attraction: dict) -> dict:
             departure_time = min(arrival_time + timedelta(hours=duration_hours), open_end_time)
 
     duration_hours = max(1, int((departure_time - arrival_time).total_seconds() // 3600) or duration_hours)
+    converted_price = _convert_planner_price_to_myr(attraction["price"], attraction.get("currency", "MYR"))
 
     return {
         "name": attraction["name"],
         "location": attraction["location"],
         "information": attraction["information"],
-        "price": float(f"{float(attraction['price']):.2f}"),
+        "price": converted_price,
         "open_time": attraction["open_time"],
         "arrival_time": arrival_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "departure_time": departure_time.strftime("%Y-%m-%dT%H:%M:%S"),

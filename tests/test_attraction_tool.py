@@ -868,6 +868,12 @@ def test_parse_gemini_ticket_payload_converts_cny_to_rm():
     assert parsed["price_type"] == "official"
 
 
+def test_normalize_ticket_price_converts_thb_to_rm():
+    normalized = attraction_tool.normalize_ticket_price("THB 500")
+
+    assert normalized == "RM 65"
+
+
 def test_get_attraction_info_rejects_wrong_attraction_ticket_source(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
     monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
