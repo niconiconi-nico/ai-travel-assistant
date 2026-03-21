@@ -131,6 +131,11 @@ def _is_recommendation_query(query: str) -> bool:
     return any(token in query for token in ["景点", "好玩", "值得去"])
 
 
+def _is_detail_query(query: str) -> bool:
+    lowered = str(query or "").lower()
+    return any(token in lowered for token in ["ticket", "price", "门票", "開放", "开放", "hours", "营业"])
+
+
 def _extract_detail_target(query: str) -> tuple[str, str]:
     text = str(query or "").strip()
     if not text:
@@ -231,60 +236,73 @@ def _clean_candidate_name(name: str) -> str:
     return text
 
 
-def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
-    candidates = get_attractions_by_place(place=city, query_type=query)
+def _seed_recommendation_candidates(city: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seeded = [dict(item) for item in candidates if isinstance(item, dict)]
+    existing = {str(item.get("name", "")).strip().lower() for item in seeded if isinstance(item, dict)}
 
-    if len(candidates) < 3 and ("george town" in city.lower() or "penang" in city.lower()):
-        seed_names = ["Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"]
-        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
-        for seed in seed_names:
+    if len(seeded) < 2 and ("george town" in city.lower() or "penang" in city.lower()):
+        for seed in ["Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"]:
             if seed.lower() not in existing:
-                candidates.append({"name": seed, "brief_description": "", "source_link": ""})
+                seeded.append({"name": seed, "brief_description": "", "source_link": ""})
                 existing.add(seed.lower())
 
     city_seed_names = _CITY_RECOMMENDATION_SEEDS.get(city.lower(), []) or _CITY_RECOMMENDATION_SEEDS.get(city, [])
-    if len(candidates) < 4 and city_seed_names:
-        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
+    if len(seeded) < 2 and city_seed_names:
         for seed in city_seed_names:
             if seed.lower() not in existing:
-                candidates.append({"name": seed, "brief_description": "", "source_link": ""})
+                seeded.append({"name": seed, "brief_description": "", "source_link": ""})
                 existing.add(seed.lower())
+
+    return seeded
+
+
+def _normalize_recommendation_candidate(item: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
+    if not isinstance(item, dict):
+        return None, ""
+
+    raw_name = item.get("name", "")
+    name = _clean_candidate_name(raw_name)
+    if not name:
+        return None, ""
+
+    description = _compact_description(item.get("description") or item.get("brief_description"))
+    image = str(item.get("image") or item.get("image_url") or "").strip()
+    ticket_price = _clean_ticket_price(item.get("ticket_price"))
+    source_link = str(item.get("source_link") or "").strip()
+
+    return (
+        {
+            "name": name,
+            "description": description,
+            "image": image,
+            "ticket_price": ticket_price,
+        },
+        source_link,
+    )
+
+
+def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
+    candidates = _seed_recommendation_candidates(
+        city=city,
+        candidates=get_attractions_by_place(place=city, query_type=query),
+    )
 
     attractions: list[dict[str, str]] = []
     sources: list[str] = []
     seen_names: set[str] = set()
 
     for item in candidates:
-        if not isinstance(item, dict):
+        normalized_item, source_link = _normalize_recommendation_candidate(item)
+        if not normalized_item:
             continue
-        name = _clean_candidate_name(item.get("name", ""))
-        if not name:
-            continue
+        name = normalized_item["name"]
         key = name.lower()
         if key in seen_names:
             continue
         seen_names.add(key)
-
-        detail = get_attraction_info(attraction_name=name, location=city, enrichment_mode="recommendation")
-        detail_sources = detail.get("sources", []) if isinstance(detail, dict) else []
-        if isinstance(detail_sources, list):
-            for src in detail_sources:
-                url = str(src or "").strip()
-                if url:
-                    sources.append(url)
-
-        description = _compact_description(detail.get("description")) or _compact_description(item.get("brief_description"))
-        image = str(detail.get("image_url") or detail.get("image") or "").strip()
-        ticket_price = _clean_ticket_price(detail.get("ticket_price"))
-
-        attractions.append(
-            {
-                "name": name,
-                "description": description,
-                "image": image,
-                "ticket_price": ticket_price,
-            }
-        )
+        attractions.append(normalized_item)
+        if source_link:
+            sources.append(source_link)
         if len(attractions) >= 8:
             break
 
@@ -509,16 +527,11 @@ def _build_detail_from_query(query: str) -> dict[str, Any]:
     name, location_hint = _extract_detail_target(query)
     detail = get_attraction_info(attraction_name=name, location=location_hint or None)
 
-    if not _compact_description(detail.get("description")) or not str(detail.get("image_url") or "").strip():
+    if location_hint and not _compact_description(detail.get("description")) and not str(detail.get("image_url") or "").strip():
         retry = get_attraction_info(attraction_name=name, location=None)
-        if not detail.get("description") and retry.get("description"):
-            detail["description"] = retry.get("description")
-        if not detail.get("image_url") and retry.get("image_url"):
-            detail["image_url"] = retry.get("image_url")
-        if not detail.get("ticket_price") and retry.get("ticket_price"):
-            detail["ticket_price"] = retry.get("ticket_price")
-        if not detail.get("sources") and retry.get("sources"):
-            detail["sources"] = retry.get("sources")
+        for key in ("description", "image_url", "ticket_price", "sources", "opening_hours", "visit_duration"):
+            if not detail.get(key) and retry.get(key):
+                detail[key] = retry.get(key)
 
     return _normalize_info(detail)
 
@@ -530,7 +543,7 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
         if city:
             return _build_recommendation_from_city(city=city, query=query)
 
-    if any(token in query.lower() for token in ["ticket", "price", "门票", "開放", "开放", "hours", "营业"]):
+    if _is_detail_query(query):
         return _build_detail_from_query(query)
 
     executor = _build_executor()

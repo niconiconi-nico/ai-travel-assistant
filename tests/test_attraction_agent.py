@@ -23,16 +23,6 @@ def test_build_recommendation_from_city_adds_beijing_seeds(monkeypatch):
         ],
     )
 
-    def fake_get_attraction_info(attraction_name: str, location: str = "", enrichment_mode: str = "detail"):
-        return {
-            "description": f"{attraction_name} description",
-            "image_url": f"https://img.example.com/{attraction_name.replace(' ', '-').lower()}.jpg",
-            "ticket_price": "",
-            "sources": [f"https://example.com/{attraction_name.replace(' ', '-').lower()}"],
-        }
-
-    monkeypatch.setattr(attraction_agent, "get_attraction_info", fake_get_attraction_info)
-
     result = attraction_agent._build_recommendation_from_city("Beijing", "北京有什么好玩的景点")
 
     names = [item["name"] for item in result["attractions"]]
@@ -46,3 +36,34 @@ def test_normalize_city_maps_kuala_lumpur_chinese_name():
     result = attraction_agent._normalize_city("吉隆坡有什么好玩的景点")
 
     assert result == "Kuala Lumpur, Malaysia"
+
+
+def test_build_recommendation_from_city_is_thin_facade_without_detail_enrichment(monkeypatch):
+    monkeypatch.setattr(
+        attraction_agent,
+        "get_attractions_by_place",
+        lambda place, query_type=None: [
+            {
+                "name": "Petronas Twin Towers",
+                "brief_description": "Iconic skyline landmark in Kuala Lumpur.",
+                "source_link": "https://example.com/petronas",
+            }
+        ],
+    )
+
+    def fail_get_attraction_info(*args, **kwargs):
+        raise AssertionError("recommendation flow should not call get_attraction_info")
+
+    monkeypatch.setattr(attraction_agent, "get_attraction_info", fail_get_attraction_info)
+
+    result = attraction_agent._build_recommendation_from_city("Kuala Lumpur, Malaysia", "吉隆坡有什么好玩的景点")
+
+    assert result["attractions"] == [
+        {
+            "name": "Petronas Twin Towers",
+            "description": "Iconic skyline landmark in Kuala Lumpur.",
+            "image": "",
+            "ticket_price": "",
+        }
+    ]
+    assert result["sources"] == ["https://example.com/petronas"]
