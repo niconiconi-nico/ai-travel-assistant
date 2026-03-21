@@ -718,6 +718,71 @@ def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
     assert [item["name"] for item in result] == ["Temple of Heaven Park"]
 
 
+def test_get_osm_city_pois_does_not_query_place_of_worship(monkeypatch):
+    captured = {"query": ""}
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_resolve_place_geometry",
+        lambda place: {"lat": 3.139, "lon": 101.687, "south": 3.0, "north": 3.2},
+    )
+
+    def fake_overpass(query: str):
+        captured["query"] = query
+        return {"elements": []}
+
+    monkeypatch.setattr(attraction_tool, "_run_overpass_query", fake_overpass)
+
+    attraction_tool._get_osm_city_pois("Kuala Lumpur", limit=5)
+
+    assert "place_of_worship" not in captured["query"]
+
+
+def test_get_attractions_by_place_queries_serpapi_before_osm_only_lists(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(
+        attraction_tool,
+        "_get_osm_city_pois",
+        lambda place, limit=8: [
+            {
+                "name": f"Local Park {idx}",
+                "description": "",
+                "image": "",
+                "ticket_price": "",
+                "sources": [f"https://osm.example.com/{idx}"],
+            }
+            for idx in range(1, 9)
+        ],
+    )
+    monkeypatch.setattr(attraction_tool, "_enrich_poi_with_knowledge", lambda poi, location=None: poi)
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    queries: list[str] = []
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        queries.append(query)
+        return {
+            "organic_results": [
+                {
+                    "title": "Petronas Twin Towers - Official Guide",
+                    "link": "https://example.com/petronas",
+                    "snippet": "Iconic skyline landmark in Kuala Lumpur.",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+
+    result = attraction_tool.get_attractions_by_place("Kuala Lumpur")
+
+    assert queries
+    assert result[0]["name"] == "Petronas Twin Towers"
+
+
 def test_parse_gemini_ticket_payload_converts_cny_to_rm():
     raw = """```json
 {"ticket_price":"成人20元/人","price_type":"official","price_note":"gov page"}

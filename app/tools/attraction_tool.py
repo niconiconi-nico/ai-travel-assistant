@@ -1435,6 +1435,10 @@ def _extract_poi_from_element(element: dict[str, Any]) -> dict[str, Any]:
         "website": _normalize_text(tags.get("website") or tags.get("url")),
         "osm_type": _normalize_text(element.get("type")),
         "osm_id": _normalize_text(element.get("id")),
+        "tourism": _normalize_text(tags.get("tourism")),
+        "historic": _normalize_text(tags.get("historic")),
+        "amenity": _normalize_text(tags.get("amenity")),
+        "leisure": _normalize_text(tags.get("leisure")),
     }
     if not poi["image"]:
         commons = _normalize_text(tags.get("wikimedia_commons"))
@@ -1466,7 +1470,6 @@ def _get_osm_city_pois(place: str, limit: int = 12) -> list[dict[str, Any]]:
       nwr(around:{radius},{lat},{lon})[tourism=museum];
       nwr(around:{radius},{lat},{lon})[tourism=viewpoint];
       nwr(around:{radius},{lat},{lon})[historic];
-      nwr(around:{radius},{lat},{lon})[amenity=place_of_worship];
       nwr(around:{radius},{lat},{lon})[leisure=park];
     );
     out tags center 120;
@@ -1626,6 +1629,19 @@ def _is_plausible_attraction_name(name: str) -> bool:
     return True
 
 
+def _clean_recommendation_candidate_name(name: str) -> str:
+    text = _normalize_text(name)
+    if not text:
+        return ""
+
+    text = re.split(r"\s[-|–:]\s", text)[0].strip()
+    text = re.sub(r"^(nearby|附近)[:：\s]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\d+\s*", "", text)
+    if not _is_plausible_attraction_name(text):
+        return ""
+    return text
+
+
 def _has_placeholder_description(text: str) -> bool:
     value = _normalize_text(text).lower()
     if not value:
@@ -1646,6 +1662,7 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
     image = _normalize_text(candidate.get("image"))
     sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
     source_count = len([s for s in sources if _normalize_text(s)])
+    source_type = _normalize_text(candidate.get("source_type")).lower()
 
     score = 0
     if not _has_placeholder_description(desc):
@@ -1659,6 +1676,12 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
         score += 1
     if any(token in name.lower() for token in ["museum", "temple", "hill", "fort", "heritage", "park", "tower"]):
         score += 1
+    if source_type == "serpapi":
+        score += 3
+    if sources:
+        top_platform = _classify_platform(_normalize_text(sources[0]), name)
+        if top_platform in {"official", "tripadvisor", "trip", "travel_guide"}:
+            score += 2
     for city_key, iconic_terms in _CITY_ICONIC_ATTRACTIONS.items():
         if city_key in city.lower():
             normalized_name = _normalize_match_text(name)
@@ -1787,16 +1810,85 @@ def normalize_recommendations_with_gemini(
     return normalized or candidates
 
 
+def _build_place_search_queries(place: str) -> list[str]:
+    return [
+        f"{place} tourist attractions",
+        f"{place} best attractions",
+        f"{place} things to do",
+        f"{place} landmarks",
+        f"{place} 景点",
+    ]
+
+
+def _collect_search_recommendation_candidates(
+    place: str,
+    api_key: str,
+    seen_names: set[str],
+    query_hint: str = "",
+    limit: int = 14,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    search_queries = _build_place_search_queries(place)
+    if query_hint:
+        search_queries.insert(0, query_hint)
+
+    for query in search_queries:
+        try:
+            payload = _search_google(query, api_key)
+        except Exception:
+            continue
+
+        for item in payload.get("organic_results", [])[:10]:
+            title = _normalize_text(item.get("title"))
+            link = _normalize_text(item.get("link"))
+            snippet = _normalize_text(item.get("snippet"))
+            name = _clean_recommendation_candidate_name(re.split(r"\s[-|–]\s", title)[0].strip() if title else "")
+            if not _is_plausible_attraction_name(name):
+                continue
+
+            name_key = name.lower()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+
+            candidate = {
+                "name": name,
+                "description": snippet,
+                "image": "",
+                "ticket_price": "",
+                "sources": [link] if link else [],
+                "source_type": "serpapi",
+            }
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
 def get_attractions_by_place(place: str, query_type: str | None = None) -> list[dict[str, str]]:
     query_hint = _normalize_text(query_type)
     place = _normalize_text(place)
     if not place:
         return []
 
-    osm_pois = _get_osm_city_pois(place, limit=14)
     candidates: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
+    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    if api_key:
+        candidates.extend(
+            _collect_search_recommendation_candidates(
+                place=place,
+                api_key=api_key,
+                seen_names=seen_names,
+                query_hint=query_hint,
+                limit=14,
+            )
+        )
+
+    osm_limit = 8 if api_key else 14
+    osm_pois = _get_osm_city_pois(place, limit=osm_limit)
     for poi in osm_pois:
         enriched = _enrich_poi_with_knowledge(poi, place)
         name = _normalize_text(enriched.get("name"))
@@ -1808,60 +1900,18 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
         seen_names.add(key)
         desc = _normalize_text(enriched.get("description"))
         sources = enriched.get("sources", []) if isinstance(enriched.get("sources"), list) else []
-        candidates.append(
-            {
-                "name": name,
-                "description": desc,
-                "image": _normalize_text(enriched.get("image")),
-                "ticket_price": _normalize_text(enriched.get("ticket_price")),
-                "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
-                "score": _recommendation_quality_score(enriched, place),
-            }
-        )
+        candidate = {
+            "name": name,
+            "description": desc,
+            "image": _normalize_text(enriched.get("image")),
+            "ticket_price": _normalize_text(enriched.get("ticket_price")),
+            "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
+            "source_type": "osm",
+        }
+        candidate["score"] = _recommendation_quality_score(candidate, place)
+        candidates.append(candidate)
         if len(candidates) >= 14:
             break
-
-    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
-    if api_key and len(candidates) < 10:
-        base_queries = [
-            f"{place} tourist attractions",
-            f"{place} best attractions",
-            f"{place} things to do",
-            f"{place} 景点",
-        ]
-
-        for query in base_queries:
-            try:
-                payload = _search_google(query, api_key)
-            except Exception:
-                continue
-
-            for item in payload.get("organic_results", [])[:10]:
-                title = _normalize_text(item.get("title"))
-                link = _normalize_text(item.get("link"))
-                snippet = _normalize_text(item.get("snippet"))
-
-                name = re.split(r"\s[-|–]\s", title)[0].strip() if title else ""
-                if not _is_plausible_attraction_name(name):
-                    continue
-
-                name_key = name.lower()
-                if name_key in seen_names:
-                    continue
-                seen_names.add(name_key)
-
-                candidates.append(
-                    {
-                        "name": name,
-                        "description": snippet,
-                        "image": "",
-                        "ticket_price": "",
-                        "sources": [link] if link else [],
-                        "score": 0,
-                    }
-                )
-                if len(candidates) >= 14:
-                    break
 
     candidates = [c for c in candidates if _is_plausible_attraction_name(_normalize_text(c.get("name")))]
     candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
