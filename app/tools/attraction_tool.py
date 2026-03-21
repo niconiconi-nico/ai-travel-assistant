@@ -85,6 +85,29 @@ def _normalize_text(value: Any) -> str:
 _ATTRACTION_ALIAS_OVERRIDES: dict[str, list[str]] = {
     "forbidden city": ["the palace museum", "palace museum", "故宫", "故宫博物院", "紫禁城"],
     "the palace museum": ["forbidden city", "故宫", "故宫博物院", "紫禁城"],
+    "petronas twin towers": [
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+        "双子塔",
+        "雙子塔",
+        "国油双峰塔",
+        "國油雙峰塔",
+        "吉隆坡双子塔",
+        "吉隆坡雙子塔",
+    ],
+    "双子塔": [
+        "petronas twin towers",
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+    ],
+    "雙子塔": [
+        "petronas twin towers",
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+    ],
     "temple of heaven": ["temple of heaven park", "天坛", "天坛公园"],
     "summer palace": ["颐和园"],
     "mutianyu great wall": ["长城", "慕田峪长城", "mutianyu"],
@@ -159,6 +182,19 @@ def _build_attraction_aliases(attraction_name: str, aliases: list[str] | None = 
             seen.add(item)
             deduped.append(item)
     return deduped
+
+
+def _preferred_lookup_name(attraction_name: str, aliases: list[str] | None = None) -> str:
+    raw_aliases = [attraction_name, *(aliases or [])]
+    seed = _normalize_match_text(attraction_name)
+    if seed in _ATTRACTION_ALIAS_OVERRIDES:
+        raw_aliases.extend(_ATTRACTION_ALIAS_OVERRIDES[seed])
+
+    for value in raw_aliases:
+        text = _normalize_text(value)
+        if re.search(r"[A-Za-z]", text):
+            return text
+    return _normalize_text(attraction_name)
 
 
 def is_source_relevant_to_attraction(
@@ -1337,6 +1373,7 @@ def analyze_visit_reasonableness_with_gemini(
         "Do not browse. Do not invent facts. "
         "Infer whether the main attraction is free, paid, partially_paid, or unknown. "
         "Use partially_paid when the landmark itself is free but a specific deck/exhibit/sub-attraction appears paid. "
+        "For landmark-style towers/buildings/plazas, prefer free or partially_paid instead of paid when no explicit admission amount is present. "
         "If official or source snippets clearly state opening hours, return them. "
         "If no price is explicit but sources strongly imply free access, return ticket_status=free and ticket_price='Free'. "
         "If uncertain, keep ticket_price empty and ticket_status=unknown. "
@@ -2244,6 +2281,7 @@ def get_attraction_info(
 ) -> dict[str, Any]:
     attraction_name = attraction_name.strip()
     attraction_aliases = _build_attraction_aliases(attraction_name)
+    lookup_name = _preferred_lookup_name(attraction_name, aliases=attraction_aliases)
     result: dict[str, Any] = {
         "query_type": "attraction_info",
         "name": attraction_name,
@@ -2271,7 +2309,7 @@ def get_attraction_info(
             return cached
 
     # OSM/Wikipedia/Wikidata first
-    poi = _search_osm_poi_by_name(attraction_name, location)
+    poi = _search_osm_poi_by_name(lookup_name, location)
     if poi:
         poi = _enrich_poi_with_knowledge(poi, location)
         result["name"] = _normalize_text(poi.get("name")) or attraction_name
@@ -2282,15 +2320,24 @@ def get_attraction_info(
         result["sources"] = poi.get("sources", []) if isinstance(poi.get("sources"), list) else []
 
     if not result["description"] or not result["image_url"]:
-        wiki_summary = fetch_wikipedia_summary(attraction_name=attraction_name, location=location)
-        if wiki_summary.get("description") and not result["description"]:
-            result["description"] = wiki_summary.get("description", "")
-        if wiki_summary.get("image_url") and not result["image_url"]:
-            result["image_url"] = wiki_summary.get("image_url", "")
-        if wiki_summary.get("source_url"):
-            result["sources"].append(wiki_summary["source_url"])
+        wiki_queries = [lookup_name, attraction_name, *[alias for alias in attraction_aliases if re.search(r"[A-Za-z]", alias)]]
+        seen_wiki_queries: set[str] = set()
+        for wiki_query in wiki_queries:
+            normalized_query = _normalize_text(wiki_query)
+            if not normalized_query or normalized_query.lower() in seen_wiki_queries:
+                continue
+            seen_wiki_queries.add(normalized_query.lower())
+            wiki_summary = fetch_wikipedia_summary(attraction_name=normalized_query, location=location)
+            if wiki_summary.get("description") and not result["description"]:
+                result["description"] = wiki_summary.get("description", "")
+            if wiki_summary.get("image_url") and not result["image_url"]:
+                result["image_url"] = wiki_summary.get("image_url", "")
+            if wiki_summary.get("source_url"):
+                result["sources"].append(wiki_summary["source_url"])
+            if result["description"] and result["image_url"]:
+                break
 
-    nominatim_result = fetch_nominatim_place(attraction_name=attraction_name, location=location)
+    nominatim_result = fetch_nominatim_place(attraction_name=lookup_name, location=location)
     if nominatim_result.get("osm_url"):
         result["sources"].append(nominatim_result["osm_url"])
 
@@ -2302,10 +2349,10 @@ def get_attraction_info(
     if api_key:
         location_suffix = f" {location}" if location else ""
         queries = [
-            f"{attraction_name}{location_suffix} official ticket",
-            f"{attraction_name}{location_suffix} admission fee",
-            f"{attraction_name}{location_suffix} opening hours",
-            f"{attraction_name}{location_suffix} official website",
+            f"{lookup_name}{location_suffix} official ticket",
+            f"{lookup_name}{location_suffix} admission fee",
+            f"{lookup_name}{location_suffix} opening hours",
+            f"{lookup_name}{location_suffix} official website",
         ]
 
         text_blobs: list[str] = []
@@ -2378,7 +2425,7 @@ def get_attraction_info(
                 )
                 _debug_log(f"rule_based_price={strong_price}")
                 gemini_price = resolve_ticket_price_with_gemini(
-                    attraction_name=attraction_name,
+                    attraction_name=lookup_name,
                     location=location,
                     sources=preferred_sources,
                     rule_based_price=strong_price,
@@ -2414,7 +2461,7 @@ def get_attraction_info(
 
         if preferred_sources and (not result["opening_hours"] or not result["ticket_price"]):
             reasoned = analyze_visit_reasonableness_with_gemini(
-                attraction_name=attraction_name,
+                attraction_name=lookup_name,
                 location=location,
                 sources=preferred_sources,
                 current_opening_hours=_normalize_text(result.get("opening_hours")),
@@ -2433,7 +2480,7 @@ def get_attraction_info(
 
         if not result["image_url"]:
             try:
-                image_data = _search_google_images(f"{attraction_name}{location_suffix}", api_key)
+                image_data = _search_google_images(f"{lookup_name}{location_suffix}", api_key)
             except Exception:
                 image_data = {}
             result["image_url"] = _pick_image_url(all_organic, image_data)
@@ -2456,6 +2503,10 @@ def get_attraction_info(
             result["ticket_price"] = ""
     if result["ticket_price"] == "Free":
         result["ticket_status"] = "free"
+    elif not result["ticket_price"] and result.get("ticket_status") == "paid":
+        result["ticket_status"] = "unknown"
+    if result["name"] == attraction_name and lookup_name != attraction_name and (result["description"] or result["sources"]):
+        result["name"] = lookup_name
 
     deduped_sources: list[str] = []
     seen: set[str] = set()

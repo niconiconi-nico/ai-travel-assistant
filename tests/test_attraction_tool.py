@@ -941,6 +941,31 @@ def test_get_attraction_info_uses_reasonableness_gemini_for_partial_paid_cases(m
     assert "skybridge" in result["price_note"].lower()
 
 
+def test_get_attraction_info_uses_english_alias_lookup_for_chinese_name(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
+
+    def fake_wikipedia_summary(attraction_name: str, location=None):
+        if attraction_name == "petronas twin towers":
+            return {
+                "description": "Petronas Twin Towers are landmark skyscrapers in Kuala Lumpur.",
+                "image_url": "https://img.example.com/petronas.jpg",
+                "source_url": "https://example.com/wiki/petronas",
+            }
+        return {"description": "", "image_url": "", "source_url": ""}
+
+    monkeypatch.setattr(attraction_tool, "fetch_wikipedia_summary", fake_wikipedia_summary)
+    monkeypatch.setattr(attraction_tool, "fetch_nominatim_place", lambda *args, **kwargs: {})
+    cache_path = Path("/tmp/attraction_tool_test_cache_alias_lookup.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
+
+    result = attraction_tool.get_attraction_info("双子塔", "Kuala Lumpur")
+
+    assert result["name"] == "petronas twin towers"
+    assert "landmark skyscrapers" in result["description"].lower()
+
+
 def test_get_attraction_info_rejects_wrong_attraction_ticket_source(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
     monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
