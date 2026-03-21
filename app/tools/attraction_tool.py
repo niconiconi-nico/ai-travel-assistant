@@ -107,12 +107,32 @@ _CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {
     ]
 }
 
+_CITY_PLACE_ALIASES: dict[str, str] = {
+    "北京": "Beijing",
+    "beijing": "Beijing",
+    "吉隆坡": "Kuala Lumpur, Malaysia",
+    "kuala lumpur": "Kuala Lumpur, Malaysia",
+    "槟城": "Penang, Malaysia",
+    "檳城": "Penang, Malaysia",
+    "penang": "Penang, Malaysia",
+    "乔治城": "George Town, Penang, Malaysia",
+    "喬治城": "George Town, Penang, Malaysia",
+    "george town": "George Town, Penang, Malaysia",
+}
+
 
 def _normalize_match_text(value: Any) -> str:
     text = _normalize_text(value).lower()
     text = re.sub(r"\([^)]*\)", " ", text)
     text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
     return " ".join(text.split())
+
+
+def _canonicalize_place_name(place: str) -> str:
+    text = _normalize_text(place)
+    if not text:
+        return ""
+    return _CITY_PLACE_ALIASES.get(text.lower(), _CITY_PLACE_ALIASES.get(text, text))
 
 
 def _build_attraction_aliases(attraction_name: str, aliases: list[str] | None = None) -> list[str]:
@@ -1868,7 +1888,7 @@ def _collect_search_recommendation_candidates(
 
 def get_attractions_by_place(place: str, query_type: str | None = None) -> list[dict[str, str]]:
     query_hint = _normalize_text(query_type)
-    place = _normalize_text(place)
+    place = _canonicalize_place_name(place)
     if not place:
         return []
 

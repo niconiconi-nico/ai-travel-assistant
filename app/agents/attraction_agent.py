@@ -42,6 +42,19 @@ _CITY_RECOMMENDATION_SEEDS: dict[str, list[str]] = {
     ],
 }
 
+_CITY_NAME_ALIASES: dict[str, str] = {
+    "北京": "Beijing",
+    "beijing": "Beijing",
+    "吉隆坡": "Kuala Lumpur, Malaysia",
+    "kuala lumpur": "Kuala Lumpur, Malaysia",
+    "槟城": "Penang, Malaysia",
+    "檳城": "Penang, Malaysia",
+    "penang": "Penang, Malaysia",
+    "乔治城": "George Town, Penang, Malaysia",
+    "喬治城": "George Town, Penang, Malaysia",
+    "george town": "George Town, Penang, Malaysia",
+}
+
 
 @tool
 def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str, Any]:
@@ -64,6 +77,13 @@ def attraction_detail_tool(attraction_name: str, location: str = "") -> dict[str
     return get_attraction_info(attraction_name=attraction_name, location=location or None)
 
 
+def _canonicalize_city_name(text: str) -> str:
+    city = str(text or "").strip()
+    if not city:
+        return ""
+    return _CITY_NAME_ALIASES.get(city.lower(), _CITY_NAME_ALIASES.get(city, city))
+
+
 def _normalize_city(text: str) -> str:
     query = str(text or "").strip()
     if not query:
@@ -83,7 +103,7 @@ def _normalize_city(text: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, query, re.IGNORECASE)
         if match:
-            return match.group(1).strip(" .,!，。")
+            return _canonicalize_city_name(match.group(1).strip(" .,!，。"))
 
     cleaned = re.sub(
         r"(有什么好玩的景点|有什么值得去的景点|景点推荐|推荐景点|attractions?|things to do|top attractions in)",
@@ -91,7 +111,7 @@ def _normalize_city(text: str) -> str:
         query,
         flags=re.IGNORECASE,
     )
-    return cleaned.strip(" .,!，。")
+    return _canonicalize_city_name(cleaned.strip(" .,!，。"))
 
 
 def _is_recommendation_query(query: str) -> bool:
@@ -122,6 +142,8 @@ def _extract_detail_target(query: str) -> tuple[str, str]:
         location_hint = "Penang, Malaysia"
     elif "beijing" in lowered or "北京" in text:
         location_hint = "Beijing"
+    elif "kuala lumpur" in lowered or "吉隆坡" in text:
+        location_hint = "Kuala Lumpur, Malaysia"
 
     cleaned = re.sub(
         r"(门票多少钱|門票多少錢|ticket\s*price|admission\s*fee|how much|开放时间|開放時間|opening\s*hours|营业时间|營業時間|visit duration|游玩时长|建議游玩时长)",

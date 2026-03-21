@@ -783,6 +783,29 @@ def test_get_attractions_by_place_queries_serpapi_before_osm_only_lists(monkeypa
     assert result[0]["name"] == "Petronas Twin Towers"
 
 
+def test_get_attractions_by_place_canonicalizes_chinese_city_name(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    queries: list[str] = []
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        queries.append(query)
+        return {"organic_results": []}
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+
+    attraction_tool.get_attractions_by_place("吉隆坡")
+
+    assert queries
+    assert queries[0].startswith("Kuala Lumpur, Malaysia")
+
+
 def test_parse_gemini_ticket_payload_converts_cny_to_rm():
     raw = """```json
 {"ticket_price":"成人20元/人","price_type":"official","price_note":"gov page"}

@@ -40,3 +40,9 @@ def test_build_recommendation_from_city_adds_beijing_seeds(monkeypatch):
     assert "Temple of Heaven" in names
     assert "Summer Palace" in names
     assert "Mutianyu Great Wall" in names
+
+
+def test_normalize_city_maps_kuala_lumpur_chinese_name():
+    result = attraction_agent._normalize_city("吉隆坡有什么好玩的景点")
+
+    assert result == "Kuala Lumpur, Malaysia"
