@@ -1961,6 +1961,16 @@ def _is_plausible_attraction_name(name: str) -> bool:
         "official site",
         "wikipedia",
         "tripadvisor",
+        "places to visit",
+        "historical landmarks",
+        "historical sites",
+        "travel guide",
+        "旅游指南",
+        "旅遊指南",
+        "hidden gems",
+        "itinerary",
+        "is there much to do",
+        "top recommendations",
         "攻略",
         "门票",
         "票价",
@@ -1970,11 +1980,16 @@ def _is_plausible_attraction_name(name: str) -> bool:
 
     generic_patterns = [
         r"^top\s+\d+",
+        r"^the\s+\d+\s+best",
         r"^\d+\s+(best|top|beautiful|must-see|must visit)",
         r"most beautiful",
         r"beautiful sights",
         r"what to do",
         r"where to go",
+        r"places to visit in ",
+        r"best places to visit",
+        r"top places to visit",
+        r"historical sites",
         r"visit .* in ",
         r"attractions? in ",
         r"guide to",
@@ -2008,6 +2023,31 @@ def _clean_recommendation_candidate_name(name: str) -> str:
     if not _is_plausible_attraction_name(text):
         return ""
     return text
+
+
+def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
+    normalized_name = _normalize_text(name).strip().lower()
+    normalized_city = _normalize_text(city).split(",", 1)[0].strip().lower()
+    if not normalized_name:
+        return True
+    if normalized_city and normalized_name == normalized_city:
+        return True
+    if any(
+        token in normalized_name
+        for token in [
+            "places to visit",
+            "historical landmarks",
+            "historical sites",
+            "travel guide",
+            "旅游指南",
+            "旅遊指南",
+            "is there much to do",
+            "top recommendations",
+            "things to do",
+        ]
+    ):
+        return True
+    return False
 
 
 def _has_placeholder_description(text: str) -> bool:
@@ -2317,7 +2357,7 @@ def _collect_search_recommendation_candidates(
         gemini_candidates = _extract_search_candidates_with_gemini(place=place, query=query, organic_results=organic_results)
         for candidate in gemini_candidates:
             name_key = _normalize_text(candidate.get("name")).lower()
-            if not name_key or name_key in seen_names:
+            if not name_key or name_key in seen_names or _looks_like_generic_destination_candidate(candidate.get("name", ""), place):
                 continue
             seen_names.add(name_key)
             candidate["score"] = _recommendation_quality_score(candidate, place)
@@ -2332,7 +2372,7 @@ def _collect_search_recommendation_candidates(
             link = _normalize_text(item.get("link"))
             snippet = _normalize_text(item.get("snippet"))
             name = _clean_recommendation_candidate_name(re.split(r"\s[-|–]\s", title)[0].strip() if title else "")
-            if not _is_plausible_attraction_name(name):
+            if not _is_plausible_attraction_name(name) or _looks_like_generic_destination_candidate(name, place):
                 continue
 
             name_key = name.lower()
@@ -2407,6 +2447,8 @@ def _collect_wikipedia_recommendation_candidates(
             name = _clean_recommendation_candidate_name(title)
             if not _is_plausible_attraction_name(name):
                 continue
+            if _looks_like_generic_destination_candidate(name, place):
+                continue
 
             lowered_name = name.lower()
             if any(token in lowered_name for token in ["tourism in ", "list of ", "history of ", "transport in "]):
@@ -2456,6 +2498,8 @@ def _collect_offline_catalog_recommendation_candidates(
             continue
         name = _normalize_text(row.get("name"))
         if not _is_plausible_attraction_name(name):
+            continue
+        if _looks_like_generic_destination_candidate(name, place):
             continue
         lowered_name = name.lower()
         if lowered_name in seen_names:
@@ -2549,7 +2593,12 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
             )
         )
 
-    candidates = [c for c in candidates if _is_plausible_attraction_name(_normalize_text(c.get("name")))]
+    candidates = [
+        c
+        for c in candidates
+        if _is_plausible_attraction_name(_normalize_text(c.get("name")))
+        and not _looks_like_generic_destination_candidate(_normalize_text(c.get("name")), place)
+    ]
     candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
     normalized = normalize_recommendations_with_gemini(user_query=query_hint or place, city=place, candidates=candidates[:14])
     if not normalized:
@@ -2558,7 +2607,7 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
     final_items: list[dict[str, str]] = []
     for item in normalized[:12]:
         name = _normalize_text(item.get("name"))
-        if not _is_plausible_attraction_name(name):
+        if not _is_plausible_attraction_name(name) or _looks_like_generic_destination_candidate(name, place):
             continue
         desc = _normalize_text(item.get("description"))
         if _has_placeholder_description(desc):

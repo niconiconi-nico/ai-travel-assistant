@@ -797,6 +797,56 @@ def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
     assert [item["name"] for item in result] == ["Temple of Heaven Park"]
 
 
+def test_get_attractions_by_place_filters_generic_destination_guides_and_city_pages(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "organic_results": [
+                {
+                    "title": "THE 10 BEST Pattaya Sights & Historical Landmarks ...",
+                    "link": "https://tripadvisor.com/pattaya-list",
+                    "snippet": "3. Big Buddha Temple · 4. Pattaya Floating Market · 5. Beach Road",
+                },
+                {
+                    "title": "芭堤雅旅游指南｜幕后建议、隐藏瑰宝、行程规划等",
+                    "link": "https://klook.com/pattaya-guide",
+                    "snippet": "热门行程和城市玩法总览",
+                },
+                {
+                    "title": "Pattaya",
+                    "link": "https://tourismthailand.org/pattaya",
+                    "snippet": "City overview page",
+                },
+                {
+                    "title": "Sanctuary of Truth",
+                    "link": "https://example.com/sanctuary",
+                    "snippet": "All-wood sanctuary in Pattaya.",
+                },
+                {
+                    "title": "Pattaya Floating Market",
+                    "link": "https://example.com/floating-market",
+                    "snippet": "Popular cultural market in Pattaya.",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+
+    result = attraction_tool.get_attractions_by_place("Pattaya")
+
+    top_names = [item["name"] for item in result[:3]]
+    assert "Sanctuary of Truth" in top_names
+    assert "Pattaya Floating Market" in top_names
+    assert all(item["name"] not in {"Pattaya", "THE 10 BEST Pattaya Sights & Historical Landmarks ..."} for item in result)
+
+
 def test_get_osm_city_pois_does_not_query_place_of_worship(monkeypatch):
     captured = {"query": ""}
 
