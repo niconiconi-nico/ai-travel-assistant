@@ -2020,9 +2020,31 @@ def _clean_recommendation_candidate_name(name: str) -> str:
     text = re.split(r"\s[-|–:]\s", text)[0].strip()
     text = re.sub(r"^(nearby|附近)[:：\s]*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\d+\s*", "", text)
+    if re.search(r"[\u4e00-\u9fff]", text) and re.search(r"[A-Za-z]", text):
+        latin_segments = [seg.strip() for seg in re.findall(r"[A-Za-z][A-Za-z0-9'&\-\s]{2,}", text) if seg.strip()]
+        plausible_latin = [seg for seg in latin_segments if _is_plausible_attraction_name(seg)]
+        if plausible_latin:
+            text = max(plausible_latin, key=len)
     if not _is_plausible_attraction_name(text):
         return ""
     return text
+
+
+def _candidate_name_grounded_in_source(name: str, source_title: str, source_snippet: str) -> bool:
+    normalized_source = _normalize_match_text(f"{source_title} {source_snippet}")
+    if not normalized_source:
+        return False
+
+    for alias in _build_attraction_aliases(name):
+        normalized_alias = _normalize_match_text(alias)
+        if not normalized_alias:
+            continue
+        if normalized_alias in normalized_source:
+            return True
+        alias_tokens = [token for token in normalized_alias.split() if len(token) >= 4]
+        if alias_tokens and all(token in normalized_source for token in alias_tokens):
+            return True
+    return False
 
 
 def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
@@ -2059,8 +2081,17 @@ def _has_placeholder_description(text: str) -> bool:
         "popular attraction in this destination",
         "top attraction",
         "must-visit attraction",
+        "a popular attraction.",
+        "a popular temple attraction.",
+        "a popular street attraction.",
+        "a popular shopping center.",
+        "a popular water park.",
+        "a recommended beach attraction.",
+        "a recommended night market attraction.",
     }
-    return value in placeholders
+    if value in placeholders:
+        return True
+    return bool(re.fullmatch(r"a\s+(popular|recommended)\s+.+attraction\.", value))
 
 
 def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
@@ -2231,11 +2262,15 @@ def _extract_search_candidates_with_gemini(
             continue
         source_index = item.get("source_index", -1)
         source_item = organic_results[source_index] if isinstance(source_index, int) and 0 <= source_index < len(organic_results) else {}
+        title = _normalize_text(source_item.get("title")) if isinstance(source_item, dict) else ""
+        snippet = _normalize_text(source_item.get("snippet")) if isinstance(source_item, dict) else ""
+        if not _candidate_name_grounded_in_source(name, title, snippet):
+            continue
         link = _normalize_text(source_item.get("link")) if isinstance(source_item, dict) else ""
         extracted.append(
             {
                 "name": name,
-                "description": _normalize_text(item.get("description")),
+                "description": "" if _has_placeholder_description(_normalize_text(item.get("description"))) else _normalize_text(item.get("description")),
                 "image": "",
                 "ticket_price": "",
                 "sources": [link] if link else [],
@@ -2311,10 +2346,15 @@ def normalize_recommendations_with_gemini(
         if final_ticket and not _is_valid_ticket_price_output(final_ticket):
             final_ticket = ""
 
+        final_description = _normalize_text(item.get("description")) or _normalize_text(base.get("description"))
+        if _has_placeholder_description(final_description):
+            base_description = _normalize_text(base.get("description"))
+            final_description = "" if _has_placeholder_description(base_description) else base_description
+
         normalized.append(
             {
                 "name": name,
-                "description": _normalize_text(item.get("description")) or _normalize_text(base.get("description")),
+                "description": final_description,
                 "image": final_image,
                 "ticket_price": final_ticket,
                 "sources": base.get("sources", []) if isinstance(base.get("sources"), list) else [],

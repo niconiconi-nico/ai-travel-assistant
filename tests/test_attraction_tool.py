@@ -153,6 +153,39 @@ def test_normalize_recommendations_with_gemini_reorders_and_sanitizes(monkeypatc
     assert normalized[1]["ticket_price"] == ""
 
 
+def test_normalize_recommendations_with_gemini_drops_placeholder_descriptions(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+
+    class DummyResp:
+        content = '{"attractions":[{"name":"A Temple","description":"A popular temple attraction.","image":"","ticket_price":""}]}'
+
+    class DummyLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def invoke(self, _prompt: str):
+            return DummyResp()
+
+    monkeypatch.setattr(attraction_tool, "ChatGoogleGenerativeAI", DummyLLM)
+    candidates = [
+        {
+            "name": "A Temple",
+            "description": "Historic waterfront temple.",
+            "image": "",
+            "ticket_price": "",
+            "sources": ["https://example.com/a"],
+        },
+    ]
+
+    normalized = attraction_tool.normalize_recommendations_with_gemini(
+        user_query="Temple recommendations",
+        city="City",
+        candidates=candidates,
+    )
+
+    assert normalized[0]["description"] == "Historic waterfront temple."
+
+
 def test_get_attractions_by_place_uses_gemini_normalized_order(monkeypatch):
     monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
 
@@ -961,6 +994,45 @@ def test_get_attractions_by_place_uses_gemini_to_extract_entities_from_list_arti
 
     assert [item["name"] for item in result[:2]] == ["Petronas Twin Towers", "KL Tower"]
     assert all("BEST Kuala Lumpur" not in item["name"] for item in result)
+
+
+def test_extract_search_candidates_with_gemini_rejects_ungrounded_name_and_cleans_mixed_script(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+
+    class DummyResponse:
+        content = '{"attractions":[{"name":"真理寺The Sanctuary of Truth","description":"A popular temple attraction.","source_index":0},{"name":"天坛大佛","description":"A popular attraction.","source_index":0}]}'
+
+    class DummyLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def invoke(self, prompt):
+            return DummyResponse()
+
+    monkeypatch.setattr(attraction_tool, "ChatGoogleGenerativeAI", DummyLLM)
+
+    results = attraction_tool._extract_search_candidates_with_gemini(
+        place="Pattaya",
+        query="芭提雅有什么好玩的景点",
+        organic_results=[
+            {
+                "title": "Best Places To Visit in Pattaya",
+                "snippet": "Top attractions in Pattaya include The Sanctuary of Truth and Pattaya Floating Market.",
+                "link": "https://example.com/pattaya-list",
+            }
+        ],
+    )
+
+    assert results == [
+        {
+            "name": "The Sanctuary of Truth",
+            "description": "",
+            "image": "",
+            "ticket_price": "",
+            "sources": ["https://example.com/pattaya-list"],
+            "source_type": "serpapi",
+        }
+    ]
 
 
 def test_get_attractions_by_place_canonicalizes_chinese_city_name(monkeypatch):
