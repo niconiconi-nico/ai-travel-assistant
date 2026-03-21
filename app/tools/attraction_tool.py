@@ -543,7 +543,30 @@ def _normalize_currency(value: str) -> str:
 
 
 def _is_reliable_source_type(source_type: str) -> bool:
-    return source_type in {"official", "government"}
+    lowered = _normalize_text(source_type).lower()
+    return lowered == "government" or lowered.startswith("official")
+
+
+_TICKET_PRICE_JUDGE_PROMPT = """
+You are a strict attraction ticket-price judge.
+Use ONLY the provided candidate pool and source snippets.
+Do NOT browse the web.
+Do NOT invent facts.
+Do NOT choose a number just because it is the only number.
+
+Your task:
+1. Review all ticket-price candidates.
+2. Prefer the candidate that most likely represents the MAIN attraction admission price.
+3. Penalize package prices, tours, bundles, transport fares, parking fees, rentals, guide fees, dining prices, or sub-attraction prices.
+4. Prefer candidates whose context mentions words like ticket, admission, entry, adult, visitor, standard, general admission.
+5. Prefer official/government sources over OTA/platform sources, and platform sources over weak/blog sources.
+6. If multiple candidates agree, treat that as stronger evidence.
+7. Preserve the ORIGINAL currency if you select a non-free price.
+8. If uncertain, return an empty ticket_price.
+
+Return JSON only in this exact shape:
+{"ticket_price":"","price_type":"official|platform|weak|free|range|unknown","price_note":"","selected_candidate_index":-1,"reason":""}
+""".strip()
 
 
 def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -552,6 +575,12 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
         amount = candidate.get("value")
         currency = _normalize_currency(_normalize_text(candidate.get("currency")))
         source_type = _normalize_text(candidate.get("source_type")).lower() or "third_party"
+        if _platform_bucket(source_type) == "official":
+            source_type = "official"
+        elif _platform_bucket(source_type) == "platform":
+            source_type = "third_party"
+        else:
+            source_type = "third_party"
         url = _normalize_text(candidate.get("url"))
         if amount is None or not currency:
             continue
@@ -611,7 +640,72 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _extract_price_candidates(text: str, source_type: str, url: str) -> list[dict[str, Any]]:
+def _extract_price_context(text: str, start: int, end: int, window: int = 80) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    snippet = re.sub(r"\s+", " ", text[left:right]).strip()
+    return snippet[:220]
+
+
+def _platform_bucket(source_type: str) -> str:
+    lowered = _normalize_text(source_type).lower()
+    if lowered.startswith("official") or lowered in {"official", "government"}:
+        return "official"
+    if any(token in lowered for token in ["ota", "klook", "trip", "kkday", "platform"]):
+        return "platform"
+    return "weak"
+
+
+def _score_ticket_candidate(candidate: dict[str, Any]) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    context = _normalize_text(candidate.get("context")).lower()
+    source_type = _normalize_text(candidate.get("source_type"))
+    bucket = _platform_bucket(source_type)
+
+    if bucket == "official":
+        score += 50
+        reasons.append("official/government source")
+    elif bucket == "platform":
+        score += 15
+        reasons.append("platform source")
+    else:
+        score -= 10
+        reasons.append("weak/non-official source")
+
+    if any(token in context for token in ["ticket", "admission", "entry", "visitor", "general admission", "standard"]):
+        score += 20
+        reasons.append("ticket/admission wording")
+    if any(token in context for token in ["adult", "成人"]):
+        score += 10
+        reasons.append("adult ticket wording")
+    if any(token in context for token in ["child", "children", "学生", "senior"]):
+        score += 3
+        reasons.append("structured pricing wording")
+
+    if any(token in context for token in ["parking", "car park", "locker", "rental", "guide fee"]):
+        score -= 30
+        reasons.append("non-admission fee wording")
+    if any(token in context for token in ["tour", "package", "combo", "bundle", "transfer", "pickup", "add-on", "addon"]):
+        score -= 35
+        reasons.append("package/tour wording")
+    if any(token in context for token in ["start from", "starting from", "prices vary", "vary by package", "from rm", "from usd", "from thb"]):
+        score -= 35
+        reasons.append("uncertain starting price wording")
+    if any(token in context for token in ["blog", "itinerary", "travel guide"]):
+        score -= 20
+        reasons.append("weak editorial context")
+
+    return score, reasons
+
+
+def _extract_price_candidates(
+    text: str,
+    source_type: str,
+    url: str,
+    title: str = "",
+    source_label: str = "",
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     patterns = [*_EXACT_PRICE_PATTERNS, *_FROM_PRICE_PATTERNS, *_RANGE_PRICE_PATTERNS]
     for pattern in patterns:
@@ -622,15 +716,99 @@ def _extract_price_candidates(text: str, source_type: str, url: str) -> list[dic
             if not currency or not numbers:
                 continue
             for number in numbers[:2]:
+                context = _extract_price_context(text, match.start(), match.end())
+                score, reasons = _score_ticket_candidate(
+                    {
+                        "context": context,
+                        "source_type": source_type,
+                    }
+                )
                 candidates.append(
                     {
                         "value": number,
                         "currency": currency,
+                        "raw_price_text": value,
+                        "context": context,
+                        "title": title,
+                        "source": source_label or source_type,
                         "source_type": source_type,
+                        "source_bucket": _platform_bucket(source_type),
+                        "score": score,
+                        "score_reasons": reasons,
                         "url": url,
                     }
                 )
     return candidates
+
+
+def _dedupe_ticket_price_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True):
+        key = (
+            _normalize_text(candidate.get("raw_price_text")).lower(),
+            _normalize_text(candidate.get("url")).lower(),
+            _normalize_text(candidate.get("context")).lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def build_ticket_price_candidate_pool(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source in sources[:8]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
+
+        source_type, _ = _classify_source_type(title=title, link=link, snippet=snippet)
+        combined = f"{title}\n{snippet}".strip()
+        if combined:
+            candidates.extend(
+                _extract_price_candidates(
+                    combined,
+                    source_type=source_type,
+                    url=link,
+                    title=title,
+                    source_label=source_type,
+                )
+            )
+
+        page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
+        if page_text:
+            candidates.extend(
+                _extract_price_candidates(
+                    page_text,
+                    source_type=source_type,
+                    url=link,
+                    title=title,
+                    source_label=source_type,
+                )
+            )
+
+    return _dedupe_ticket_price_candidates(candidates)
 
 
 def _infer_source_type(link: str) -> str:
@@ -784,24 +962,7 @@ def _collect_price_candidates_from_sources(
     attraction_name: str = "",
     aliases: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for source in sources:
-        snippet = _normalize_text(source.get("snippet"))
-        title = _normalize_text(source.get("title"))
-        link = _normalize_text(source.get("link"))
-        if attraction_name and not is_source_relevant_to_attraction(
-            attraction_name=attraction_name,
-            source_title=title,
-            source_snippet=snippet,
-            aliases=aliases,
-        ):
-            continue
-        combined = f"{title} {snippet}".strip()
-        if not combined:
-            continue
-        source_type = _infer_source_type(link)
-        candidates.extend(_extract_price_candidates(combined, source_type=source_type, url=link))
-    return candidates
+    return build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
 
 
 def _extract_domain(url: str) -> str:
@@ -1054,6 +1215,15 @@ def resolve_ticket_price_from_sources(
     attraction_name: str = "",
     aliases: list[str] | None = None,
 ) -> str:
+    candidate_pool = build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
+    if candidate_pool:
+        if max(int(candidate.get("score", 0)) for candidate in candidate_pool) <= 20:
+            return ""
+        resolved = resolve_ticket_price(candidate_pool)
+        picked = _normalize_text(resolved.get("ticket_price"))
+        if picked:
+            return picked
+
     ranked = []
     for src in sources:
         title = _normalize_text(src.get("title"))
@@ -1135,6 +1305,10 @@ def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
     ticket_price = _normalize_text(payload.get("ticket_price"))
     price_type = _normalize_text(payload.get("price_type")).lower() or "unknown"
     price_note = _normalize_text(payload.get("price_note"))
+    if price_type == "platform":
+        price_type = "third_party"
+    elif price_type == "weak":
+        price_type = "third_party"
 
     if ticket_price and ticket_price != "Free":
         ticket_price = ticket_price.replace("-", "–")
@@ -1220,6 +1394,7 @@ def resolve_ticket_price_with_gemini(
     if not api_key or not sources:
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
 
+    candidate_pool = build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
     ranked_sources: list[tuple[int, dict[str, str], str]] = []
     for source in sources[:8]:
         title = _normalize_text(source.get("title"))
@@ -1289,23 +1464,27 @@ def resolve_ticket_price_with_gemini(
         "attraction_name": attraction_name,
         "location": location or "",
         "rule_based_price": rule_based_price,
+        "candidate_pool": [
+            {
+                "value": candidate.get("value"),
+                "currency": candidate.get("currency"),
+                "raw_price_text": candidate.get("raw_price_text"),
+                "context": candidate.get("context"),
+                "source_type": candidate.get("source_type"),
+                "source_bucket": candidate.get("source_bucket"),
+                "score": candidate.get("score"),
+                "score_reasons": candidate.get("score_reasons"),
+                "url": candidate.get("url"),
+                "title": candidate.get("title"),
+            }
+            for candidate in candidate_pool[:20]
+        ],
         "sources": source_entries,
     }
 
-    prompt = (
-        "You are a strict ticket-price resolver. Use ONLY provided text. "
-        "Do not browse. Do not guess. Do not use outside knowledge. "
-        "If uncertain, return empty ticket_price. "
-        "Focus on main attraction admission, avoid packages/add-ons/sub-attractions. "
-        "Final displayed ticket_price must be in RM using approximate built-in conversion when the source is not already in MYR/RM. "
-        "Return JSON only with shape: "
-        '{"ticket_price":"PRICE_OR_EMPTY","price_type":"official|third_party|free|range|unknown","price_note":"SHORT_REASON"}. '
-        "Allowed ticket_price forms: RM 16, RM 16–RM 30, Free, or ''."
-    )
-
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
-        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+        response = llm.invoke(f"{_TICKET_PRICE_JUDGE_PROMPT}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
     except Exception:
         _debug_log("gemini_call_failed=True")
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
@@ -2442,6 +2621,7 @@ def get_attraction_info(
         "ticket_status": "unknown",
         "price_type": "unknown",
         "price_note": "Official price not found.",
+        "ticket_price_candidates": [],
         "sources": [],
     }
 
@@ -2527,6 +2707,11 @@ def get_attraction_info(
             attraction_name=attraction_name,
             aliases=attraction_aliases,
         )
+        result["ticket_price_candidates"] = build_ticket_price_candidate_pool(
+            sources=preferred_sources,
+            attraction_name=lookup_name,
+            aliases=attraction_aliases,
+        )[:20]
         opening_hour_text_blobs: list[str] = []
         for src in preferred_sources:
             title = _normalize_text(src.get("title"))
@@ -2591,10 +2776,11 @@ def get_attraction_info(
                     result["ticket_price"] = strong_price
                     result["ticket_status"] = "free" if strong_price == "Free" else "paid"
                     result["price_type"] = "exact" if "–" not in strong_price else "range"
-                    result["price_note"] = "Parsed from ticket-related source content"
+                    candidate_count = len(result.get("ticket_price_candidates") or [])
+                    result["price_note"] = f"Parsed from ticket-related source content ({candidate_count} candidates reviewed)"
                     _debug_log("ticket_price_path=rule_based_fallback")
                 else:
-                    price_candidates = _collect_price_candidates_from_sources(
+                    price_candidates = result.get("ticket_price_candidates") or _collect_price_candidates_from_sources(
                         preferred_sources,
                         attraction_name=attraction_name,
                         aliases=attraction_aliases,

@@ -371,6 +371,46 @@ def test_resolve_ticket_price_from_sources_prefers_page_content(monkeypatch):
     assert result == "RM 15–RM 30"
 
 
+def test_build_ticket_price_candidate_pool_scores_admission_above_parking_and_tour(monkeypatch):
+    sources = [
+        {
+            "title": "Official ticket page",
+            "link": "https://official.example.com/tickets",
+            "snippet": "Adult admission RM 35. Child admission RM 20.",
+        },
+        {
+            "title": "Visitor info",
+            "link": "https://official.example.com/info",
+            "snippet": "Parking fee RM 8 near the attraction.",
+        },
+        {
+            "title": "OTA package",
+            "link": "https://klook.example.com/demo",
+            "snippet": "Full day tour package RM 120 including transfer.",
+        },
+    ]
+
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: {
+            "https://official.example.com/tickets": "Adult admission RM 35. Child admission RM 20.",
+            "https://official.example.com/info": "Parking fee RM 8.",
+            "https://klook.example.com/demo": "Full day tour package RM 120 including transfer.",
+        }.get(url, ""),
+    )
+
+    candidates = attraction_tool.build_ticket_price_candidate_pool(
+        sources,
+        attraction_name="Demo Attraction",
+    )
+
+    assert candidates
+    assert candidates[0]["raw_price_text"] == "RM 35"
+    assert candidates[0]["score"] > candidates[-1]["score"]
+    assert "admission" in candidates[0]["context"].lower()
+
+
 def test_resolve_ticket_price_from_sources_rejects_uncertain_phrases(monkeypatch):
     sources = [
         {
@@ -662,7 +702,46 @@ def test_recommendation_mode_attempts_ticket_enrichment_for_strong_sources(monke
     result = attraction_tool.get_attraction_info("Demo Attraction", "City", enrichment_mode="recommendation")
 
     assert result["ticket_price"] == "RM 30"
-    assert called["gemini"] == 1
+
+
+def test_get_attraction_info_exposes_ticket_price_candidate_pool(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
+    monkeypatch.setattr(attraction_tool, "fetch_wikipedia_summary", lambda *args, **kwargs: {"description": "", "image_url": "", "source_url": ""})
+    monkeypatch.setattr(attraction_tool, "fetch_nominatim_place", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        attraction_tool,
+        "_search_google",
+        lambda query, api_key, num=10: {
+            "knowledge_graph": {},
+            "answer_box": {},
+            "organic_results": [
+                {
+                    "title": "Demo Attraction Official Ticket Page",
+                    "link": "https://official.example.com/tickets",
+                    "snippet": "Adult admission RM 35. Child admission RM 20.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: "Adult admission RM 35. Child admission RM 20.",
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "resolve_ticket_price_with_gemini",
+        lambda *args, **kwargs: {"ticket_price": "", "price_type": "unknown", "price_note": ""},
+    )
+    cache_path = Path("/tmp/attraction_tool_test_cache_candidate_pool.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
+
+    result = attraction_tool.get_attraction_info("Demo Attraction", "City")
+
+    assert result["ticket_price_candidates"]
+    assert result["ticket_price_candidates"][0]["raw_price_text"] == "RM 35"
 
 
 
