@@ -2016,6 +2016,21 @@ def _is_plausible_attraction_name(name: str) -> bool:
         "itinerary",
         "is there much to do",
         "top recommendations",
+        "landmark tours",
+        "tour package",
+        "自由行",
+        "必去",
+        "必玩",
+        "景點推薦",
+        "景点推荐",
+        "熱門旅遊景點",
+        "热门旅游景点",
+        "一日遊行程",
+        "一日游行程",
+        "親子好去處",
+        "亲子好去处",
+        "親子遊景點推薦",
+        "亲子游景点推荐",
         "攻略",
         "门票",
         "票价",
@@ -2035,15 +2050,24 @@ def _is_plausible_attraction_name(name: str) -> bool:
         r"best places to visit",
         r"top places to visit",
         r"historical sites",
+        r"自由行",
+        r"景點推薦|景点推荐",
+        r"親子好去處|亲子好去处",
+        r"一日遊行程|一日游行程",
+        r"熱門旅遊景點|热门旅游景点",
         r"visit .* in ",
         r"attractions? in ",
         r"guide to",
         r"nearby",
+        r"\btours?\b$",
+        r"^ep\d+\b",
     ]
     if any(re.search(pattern, lowered) for pattern in generic_patterns):
         return False
 
     if re.search(r"\b\d{4}\b", text):
+        return False
+    if re.fullmatch(r"[A-Za-z]{1,4}\d*[-–:]?", text):
         return False
 
     meaningful_tokens = [
@@ -2111,8 +2135,22 @@ def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
             "is there much to do",
             "top recommendations",
             "things to do",
+            "自由行",
+            "景點推薦",
+            "景点推荐",
+            "熱門旅遊景點",
+            "热门旅游景点",
+            "一日遊行程",
+            "一日游行程",
+            "親子好去處",
+            "亲子好去处",
+            "landmark tours",
+            "門票",
+            "门票",
         ]
     ):
+        return True
+    if re.search(r"\btours?\b", normalized_name):
         return True
     return False
 

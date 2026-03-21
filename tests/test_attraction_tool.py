@@ -880,6 +880,64 @@ def test_get_attractions_by_place_filters_generic_destination_guides_and_city_pa
     assert all(item["name"] not in {"Pattaya", "THE 10 BEST Pattaya Sights & Historical Landmarks ..."} for item in result)
 
 
+def test_get_attractions_by_place_filters_noisy_chinese_guide_and_tour_titles(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "organic_results": [
+                {
+                    "title": "芭堤雅必玩熱門旅遊景點與一日遊行程及門票",
+                    "link": "https://example.com/pattaya-guide",
+                    "snippet": "熱門景點 · 喬木提恩海灘 · 芭堤雅海灘 · 步行街",
+                },
+                {
+                    "title": "Pattaya Landmark Tours",
+                    "link": "https://example.com/pattaya-tours",
+                    "snippet": "Explore Pattaya on a full-day tour with a guide.",
+                },
+                {
+                    "title": "【2025芭堤雅自由行】一篇搞定！芭堤雅景點美食、交通",
+                    "link": "https://example.com/pattaya-free-travel",
+                    "snippet": "含17個景點如真理寺、七珍佛山",
+                },
+                {
+                    "title": "EP5-",
+                    "link": "https://youtube.com/demo",
+                    "snippet": "泰国芭提雅2026超强攻略",
+                },
+                {
+                    "title": "The Sanctuary of Truth",
+                    "link": "https://example.com/sanctuary",
+                    "snippet": "All-wood sanctuary in Pattaya.",
+                },
+                {
+                    "title": "Dolphinarium Pattaya",
+                    "link": "https://example.com/dolphinarium",
+                    "snippet": "Popular dolphin show venue in Pattaya.",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+
+    result = attraction_tool.get_attractions_by_place("Pattaya")
+
+    names = [item["name"] for item in result]
+    assert "The Sanctuary of Truth" in names
+    assert "Dolphinarium Pattaya" in names
+    assert "芭堤雅必玩熱門旅遊景點與一日遊行程及門票" not in names
+    assert "Pattaya Landmark Tours" not in names
+    assert "【2025芭堤雅自由行】一篇搞定！芭堤雅景點美食、交通" not in names
+    assert "EP5-" not in names
+
+
 def test_get_osm_city_pois_does_not_query_place_of_worship(monkeypatch):
     captured = {"query": ""}
 
