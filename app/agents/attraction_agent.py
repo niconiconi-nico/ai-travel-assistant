@@ -452,6 +452,8 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
     opening_hours = _normalize_opening_hours(payload.get("opening_hours"))
     visit_duration = str(payload.get("visit_duration") or "").strip()
     ticket_price = _clean_ticket_price(payload.get("ticket_price"))
+    ticket_status = str(payload.get("ticket_status") or "").strip().lower() or ("free" if ticket_price == "Free" else "unknown")
+    price_note = str(payload.get("price_note") or "").strip()
 
     return {
         "query_type": "attraction_info",
@@ -461,6 +463,8 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
         "opening_hours": opening_hours,
         "visit_duration": visit_duration,
         "ticket_price": ticket_price,
+        "ticket_status": ticket_status,
+        "price_note": price_note,
         "sources": sources,
     }
 
@@ -517,7 +521,7 @@ def _build_executor() -> Any:
         "Recommendation JSON schema:\n"
         "{\"query_type\":\"attraction_recommendation\",\"city\":\"string\",\"attractions\":[{\"name\":\"string\",\"description\":\"string\",\"image\":\"string\",\"ticket_price\":\"string\"}],\"sources\":[]}\n"
         "Info JSON schema:\n"
-        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"description\":\"string\",\"image\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"sources\":[]}\n"
+        "{\"query_type\":\"attraction_info\",\"name\":\"string\",\"description\":\"string\",\"image\":\"string\",\"opening_hours\":\"string\",\"visit_duration\":\"string\",\"ticket_price\":\"string\",\"ticket_status\":\"string\",\"price_note\":\"string\",\"sources\":[]}\n"
         "Use tools whenever possible and keep all fields present."
     )
     return create_agent(model=llm, tools=tools, system_prompt=system_prompt)

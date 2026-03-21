@@ -67,3 +67,22 @@ def test_build_recommendation_from_city_is_thin_facade_without_detail_enrichment
         }
     ]
     assert result["sources"] == ["https://example.com/petronas"]
+
+
+def test_normalize_info_preserves_ticket_status_and_price_note():
+    normalized = attraction_agent._normalize_info(
+        {
+            "name": "Petronas Twin Towers",
+            "description": "Landmark in Kuala Lumpur.",
+            "image_url": "https://img.example.com/petronas.jpg",
+            "opening_hours": "",
+            "visit_duration": "1-2 hours",
+            "ticket_price": "",
+            "ticket_status": "partially_paid",
+            "price_note": "Exterior visit is free; skybridge admission may require a ticket.",
+            "sources": ["https://www.petronastwintowers.com.my/"],
+        }
+    )
+
+    assert normalized["ticket_status"] == "partially_paid"
+    assert "skybridge" in normalized["price_note"].lower()

@@ -874,6 +874,73 @@ def test_normalize_ticket_price_converts_thb_to_rm():
     assert normalized == "RM 65"
 
 
+def test_get_attraction_info_uses_reasonableness_gemini_for_partial_paid_cases(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+    monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        attraction_tool,
+        "fetch_wikipedia_summary",
+        lambda attraction_name, location=None: {
+            "description": "Iconic twin-tower landmark in Kuala Lumpur.",
+            "image_url": "https://img.example.com/petronas.jpg",
+            "source_url": "https://example.com/wiki/petronas",
+        },
+    )
+    monkeypatch.setattr(attraction_tool, "fetch_nominatim_place", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        attraction_tool,
+        "_search_google",
+        lambda query, api_key, num=10: {
+            "knowledge_graph": {},
+            "answer_box": {},
+            "organic_results": [
+                {
+                    "title": "Petronas Twin Towers Official Website",
+                    "link": "https://www.petronastwintowers.com.my/",
+                    "snippet": "Visit the towers and skybridge experience.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "collect_preferred_sources",
+        lambda *args, **kwargs: [
+            {
+                "title": "Petronas Twin Towers Official Website",
+                "link": "https://www.petronastwintowers.com.my/",
+                "snippet": "Visit the towers and skybridge experience.",
+            }
+        ],
+    )
+    monkeypatch.setattr(attraction_tool, "resolve_ticket_price_from_sources", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        attraction_tool,
+        "resolve_ticket_price_with_gemini",
+        lambda *args, **kwargs: {"ticket_price": "", "price_type": "unknown", "price_note": ""},
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "analyze_visit_reasonableness_with_gemini",
+        lambda *args, **kwargs: {
+            "opening_hours": "",
+            "ticket_price": "",
+            "ticket_status": "partially_paid",
+            "price_note": "Exterior visit is free; skybridge admission may require a ticket.",
+        },
+    )
+    cache_path = Path("/tmp/attraction_tool_test_cache_reasonableness.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
+
+    result = attraction_tool.get_attraction_info("Petronas Twin Towers", "Kuala Lumpur")
+
+    assert result["ticket_price"] == ""
+    assert result["ticket_status"] == "partially_paid"
+    assert "skybridge" in result["price_note"].lower()
+
+
 def test_get_attraction_info_rejects_wrong_attraction_ticket_source(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
     monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})

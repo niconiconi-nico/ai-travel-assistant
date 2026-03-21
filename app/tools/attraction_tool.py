@@ -1121,6 +1121,57 @@ def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
     }
 
 
+def _parse_reasonableness_gemini_payload(raw_text: str) -> dict[str, str]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    cleaned = text
+    if "```" in cleaned:
+        cleaned = "\n".join(line for line in cleaned.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(cleaned[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    opening_hours = _normalize_opening_hours_value(_normalize_text(payload.get("opening_hours")))
+    ticket_price = _normalize_text(payload.get("ticket_price"))
+    ticket_status = _normalize_text(payload.get("ticket_status")).lower() or "unknown"
+    price_note = _normalize_text(payload.get("price_note"))
+
+    if ticket_price:
+        normalized_ticket_price = normalize_ticket_price(ticket_price)
+        if normalized_ticket_price:
+            ticket_price = normalized_ticket_price
+        elif ticket_price != "Free":
+            ticket_price = ""
+
+    if ticket_price == "Free":
+        ticket_status = "free"
+
+    if ticket_status not in {"free", "paid", "partially_paid", "unknown"}:
+        ticket_status = "unknown"
+
+    return {
+        "opening_hours": opening_hours,
+        "ticket_price": ticket_price,
+        "ticket_status": ticket_status,
+        "price_note": price_note,
+    }
+
+
 def resolve_ticket_price_with_gemini(
     attraction_name: str,
     location: str | None,
@@ -1227,6 +1278,82 @@ def resolve_ticket_price_with_gemini(
     _debug_log(f"gemini_raw_response={content[:500]}")
     parsed = _parse_gemini_ticket_payload(content)
     return parsed
+
+
+def analyze_visit_reasonableness_with_gemini(
+    attraction_name: str,
+    location: str | None,
+    sources: list[dict[str, str]],
+    current_opening_hours: str = "",
+    current_ticket_price: str = "",
+    aliases: list[str] | None = None,
+) -> dict[str, str]:
+    api_key = _resolve_gemini_api_key()
+    if not api_key or not sources:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    source_entries: list[dict[str, str]] = []
+    for source in sources[:6]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
+        page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
+        source_entries.append(
+            {
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "content": page_text[:2200],
+            }
+        )
+
+    if not source_entries:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    payload = {
+        "attraction_name": attraction_name,
+        "location": location or "",
+        "current_opening_hours": current_opening_hours,
+        "current_ticket_price": current_ticket_price,
+        "sources": source_entries,
+    }
+    prompt = (
+        "You analyze attraction visit practicality from provided sources only. "
+        "Do not browse. Do not invent facts. "
+        "Infer whether the main attraction is free, paid, partially_paid, or unknown. "
+        "Use partially_paid when the landmark itself is free but a specific deck/exhibit/sub-attraction appears paid. "
+        "If official or source snippets clearly state opening hours, return them. "
+        "If no price is explicit but sources strongly imply free access, return ticket_status=free and ticket_price='Free'. "
+        "If uncertain, keep ticket_price empty and ticket_status=unknown. "
+        "Return JSON only with shape: "
+        '{"opening_hours":"","ticket_price":"","ticket_status":"free|paid|partially_paid|unknown","price_note":""}.'
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        _debug_log("reasonableness_gemini_call_failed=True")
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    raw = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"reasonableness_gemini_raw={raw[:500]}")
+    return _parse_reasonableness_gemini_payload(raw)
 
 
 def _classify_platform(link: str, title: str = "") -> str:
@@ -2125,6 +2252,7 @@ def get_attraction_info(
         "opening_hours": "",
         "visit_duration": "",
         "ticket_price": "",
+        "ticket_status": "unknown",
         "price_type": "unknown",
         "price_note": "Official price not found.",
         "sources": [],
@@ -2259,11 +2387,13 @@ def get_attraction_info(
                 gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
                 if gemini_ticket_price:
                     result["ticket_price"] = gemini_ticket_price
+                    result["ticket_status"] = "free" if gemini_ticket_price == "Free" else "paid"
                     result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
                     result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
                     _debug_log("ticket_price_path=gemini")
                 elif strong_price:
                     result["ticket_price"] = strong_price
+                    result["ticket_status"] = "free" if strong_price == "Free" else "paid"
                     result["price_type"] = "exact" if "–" not in strong_price else "range"
                     result["price_note"] = "Parsed from ticket-related source content"
                     _debug_log("ticket_price_path=rule_based_fallback")
@@ -2276,9 +2406,30 @@ def get_attraction_info(
                     _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
                     price_resolution = resolve_ticket_price(price_candidates)
                     result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
+                    if result["ticket_price"]:
+                        result["ticket_status"] = "free" if result["ticket_price"] == "Free" else "paid"
                     result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
                     result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
                     _debug_log("ticket_price_path=legacy_fallback")
+
+        if preferred_sources and (not result["opening_hours"] or not result["ticket_price"]):
+            reasoned = analyze_visit_reasonableness_with_gemini(
+                attraction_name=attraction_name,
+                location=location,
+                sources=preferred_sources,
+                current_opening_hours=_normalize_text(result.get("opening_hours")),
+                current_ticket_price=_normalize_text(result.get("ticket_price")),
+                aliases=attraction_aliases,
+            )
+            if not result["opening_hours"] and _normalize_text(reasoned.get("opening_hours")):
+                result["opening_hours"] = _normalize_text(reasoned.get("opening_hours"))
+            if not result["ticket_price"] and _normalize_text(reasoned.get("ticket_price")):
+                result["ticket_price"] = _normalize_text(reasoned.get("ticket_price"))
+            reasoned_status = _normalize_text(reasoned.get("ticket_status")).lower()
+            if reasoned_status in {"free", "paid", "partially_paid"}:
+                result["ticket_status"] = reasoned_status
+            if _normalize_text(reasoned.get("price_note")):
+                result["price_note"] = _normalize_text(reasoned.get("price_note"))
 
         if not result["image_url"]:
             try:
@@ -2303,6 +2454,8 @@ def get_attraction_info(
             pass
         else:
             result["ticket_price"] = ""
+    if result["ticket_price"] == "Free":
+        result["ticket_status"] = "free"
 
     deduped_sources: list[str] = []
     seen: set[str] = set()
