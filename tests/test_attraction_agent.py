@@ -32,10 +32,44 @@ def test_build_recommendation_from_city_adds_beijing_seeds(monkeypatch):
     assert "Mutianyu Great Wall" in names
 
 
+def test_build_recommendation_from_city_adds_requested_city_seeds(monkeypatch):
+    monkeypatch.setattr(attraction_agent, "get_attractions_by_place", lambda place, query_type=None: [])
+    monkeypatch.setattr(
+        attraction_agent,
+        "get_attraction_info",
+        lambda attraction_name, location=None: {
+            "name": attraction_name,
+            "description": "",
+            "image_url": "",
+            "ticket_price": "",
+            "sources": [],
+        },
+    )
+
+    cases = {
+        "Kuala Lumpur, Malaysia": {"Petronas Twin Towers", "KL Tower", "Batu Caves", "Central Market"},
+        "Pattaya": {"The Sanctuary of Truth", "Pattaya Floating Market", "Big Buddha Temple", "Nong Nooch Tropical Garden"},
+        "Bangkok": {"The Grand Palace", "Wat Pho", "Wat Arun", "Chatuchak Weekend Market"},
+        "Shanghai": {"The Bund", "Oriental Pearl Tower", "Yu Garden", "Shanghai Tower"},
+        "Penang, Malaysia": {"Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"},
+    }
+
+    for city, expected in cases.items():
+        result = attraction_agent._build_recommendation_from_city(city, f"{city} attractions")
+        names = {item["name"] for item in result["attractions"]}
+        assert expected.issubset(names)
+
+
 def test_normalize_city_maps_kuala_lumpur_chinese_name():
     result = attraction_agent._normalize_city("吉隆坡有什么好玩的景点")
 
     assert result == "Kuala Lumpur, Malaysia"
+
+
+def test_normalize_city_maps_shanghai_chinese_name():
+    result = attraction_agent._normalize_city("上海有什么好玩的景点")
+
+    assert result == "Shanghai"
 
 
 def test_build_recommendation_from_city_enriches_thin_candidates_with_detail(monkeypatch):
@@ -65,15 +99,15 @@ def test_build_recommendation_from_city_enriches_thin_candidates_with_detail(mon
 
     result = attraction_agent._build_recommendation_from_city("Kuala Lumpur, Malaysia", "吉隆坡有什么好玩的景点")
 
-    assert result["attractions"] == [
-        {
-            "name": "Petronas Twin Towers",
-            "description": "Iconic skyline landmark in Kuala Lumpur.",
-            "image": "https://img.example.com/petronas.jpg",
-            "ticket_price": "RM 98",
-        }
-    ]
-    assert result["sources"] == ["https://example.com/petronas"]
+    assert result["attractions"][0] == {
+        "name": "Petronas Twin Towers",
+        "description": "Iconic skyline landmark in Kuala Lumpur.",
+        "image": "https://img.example.com/petronas.jpg",
+        "ticket_price": "RM 98",
+    }
+    names = {item["name"] for item in result["attractions"]}
+    assert {"KL Tower", "Batu Caves", "Central Market"}.issubset(names)
+    assert "https://example.com/petronas" in result["sources"]
 
 def test_normalize_info_preserves_ticket_status_and_price_note():
     normalized = attraction_agent._normalize_info(

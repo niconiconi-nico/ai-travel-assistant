@@ -40,11 +40,49 @@ _CITY_RECOMMENDATION_SEEDS: dict[str, list[str]] = {
         "Summer Palace",
         "Mutianyu Great Wall",
     ],
+    "kuala lumpur, malaysia": [
+        "Petronas Twin Towers",
+        "KL Tower",
+        "Batu Caves",
+        "Central Market",
+    ],
+    "pattaya": [
+        "The Sanctuary of Truth",
+        "Pattaya Floating Market",
+        "Big Buddha Temple",
+        "Nong Nooch Tropical Garden",
+    ],
+    "bangkok": [
+        "The Grand Palace",
+        "Wat Pho",
+        "Wat Arun",
+        "Chatuchak Weekend Market",
+    ],
+    "shanghai": [
+        "The Bund",
+        "Oriental Pearl Tower",
+        "Yu Garden",
+        "Shanghai Tower",
+    ],
+    "上海": [
+        "The Bund",
+        "Oriental Pearl Tower",
+        "Yu Garden",
+        "Shanghai Tower",
+    ],
+    "penang, malaysia": [
+        "Penang Hill",
+        "Chew Jetty",
+        "Kek Lok Si Temple",
+        "Armenian Street",
+    ],
 }
 
 _CITY_NAME_ALIASES: dict[str, str] = {
     "北京": "Beijing",
     "beijing": "Beijing",
+    "上海": "Shanghai",
+    "shanghai": "Shanghai",
     "芭堤雅": "Pattaya",
     "芭提雅": "Pattaya",
     "pattaya": "Pattaya",
