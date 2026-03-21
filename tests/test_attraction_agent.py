@@ -38,7 +38,7 @@ def test_normalize_city_maps_kuala_lumpur_chinese_name():
     assert result == "Kuala Lumpur, Malaysia"
 
 
-def test_build_recommendation_from_city_is_thin_facade_without_detail_enrichment(monkeypatch):
+def test_build_recommendation_from_city_enriches_thin_candidates_with_detail(monkeypatch):
     monkeypatch.setattr(
         attraction_agent,
         "get_attractions_by_place",
@@ -51,10 +51,17 @@ def test_build_recommendation_from_city_is_thin_facade_without_detail_enrichment
         ],
     )
 
-    def fail_get_attraction_info(*args, **kwargs):
-        raise AssertionError("recommendation flow should not call get_attraction_info")
-
-    monkeypatch.setattr(attraction_agent, "get_attraction_info", fail_get_attraction_info)
+    monkeypatch.setattr(
+        attraction_agent,
+        "get_attraction_info",
+        lambda attraction_name, location=None: {
+            "name": attraction_name,
+            "description": "Observation deck and skyline icon.",
+            "image_url": "https://img.example.com/petronas.jpg",
+            "ticket_price": "RM 98",
+            "sources": ["https://example.com/detail"],
+        },
+    )
 
     result = attraction_agent._build_recommendation_from_city("Kuala Lumpur, Malaysia", "吉隆坡有什么好玩的景点")
 
@@ -62,11 +69,29 @@ def test_build_recommendation_from_city_is_thin_facade_without_detail_enrichment
         {
             "name": "Petronas Twin Towers",
             "description": "Iconic skyline landmark in Kuala Lumpur.",
-            "image": "",
-            "ticket_price": "",
+            "image": "https://img.example.com/petronas.jpg",
+            "ticket_price": "RM 98",
         }
     ]
     assert result["sources"] == ["https://example.com/petronas"]
+
+
+def test_build_recommendation_from_city_uses_pattaya_fallback_when_search_is_empty(monkeypatch):
+    monkeypatch.setattr(attraction_agent, "get_attractions_by_place", lambda place, query_type=None: [])
+
+    def fail_get_attraction_info(*args, **kwargs):
+        raise AssertionError("fallback recommendations should not require detail lookup")
+
+    monkeypatch.setattr(attraction_agent, "get_attraction_info", fail_get_attraction_info)
+
+    result = attraction_agent._build_recommendation_from_city("Pattaya", "Pattaya有什么好玩的景点")
+
+    assert len(result["attractions"]) >= 4
+    assert result["attractions"][0]["name"] == "Sanctuary of Truth"
+    assert result["attractions"][0]["description"]
+    assert result["attractions"][0]["image"].startswith("https://")
+    assert result["attractions"][0]["ticket_price"] == "THB 500"
+    assert result["sources"]
 
 
 def test_normalize_info_preserves_ticket_status_and_price_note():

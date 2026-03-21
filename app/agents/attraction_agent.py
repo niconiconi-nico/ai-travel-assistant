@@ -40,11 +40,46 @@ _CITY_RECOMMENDATION_SEEDS: dict[str, list[str]] = {
         "Summer Palace",
         "Mutianyu Great Wall",
     ],
+    "pattaya": [
+        "Sanctuary of Truth",
+        "Nong Nooch Tropical Garden",
+        "Pattaya Floating Market",
+        "Big Buddha Temple",
+    ],
+    "芭堤雅": [
+        "Sanctuary of Truth",
+        "Nong Nooch Tropical Garden",
+        "Pattaya Floating Market",
+        "Big Buddha Temple",
+    ],
+    "芭提雅": [
+        "Sanctuary of Truth",
+        "Nong Nooch Tropical Garden",
+        "Pattaya Floating Market",
+        "Big Buddha Temple",
+    ],
+    "bangkok": [
+        "The Grand Palace",
+        "Wat Pho",
+        "Wat Arun",
+        "Jim Thompson House Museum",
+    ],
+    "曼谷": [
+        "The Grand Palace",
+        "Wat Pho",
+        "Wat Arun",
+        "Jim Thompson House Museum",
+    ],
 }
 
 _CITY_NAME_ALIASES: dict[str, str] = {
     "北京": "Beijing",
     "beijing": "Beijing",
+    "芭堤雅": "Pattaya",
+    "芭提雅": "Pattaya",
+    "pattaya": "Pattaya",
+    "曼谷": "Bangkok",
+    "bangkok": "Bangkok",
     "吉隆坡": "Kuala Lumpur, Malaysia",
     "kuala lumpur": "Kuala Lumpur, Malaysia",
     "槟城": "Penang, Malaysia",
@@ -53,6 +88,67 @@ _CITY_NAME_ALIASES: dict[str, str] = {
     "乔治城": "George Town, Penang, Malaysia",
     "喬治城": "George Town, Penang, Malaysia",
     "george town": "George Town, Penang, Malaysia",
+}
+
+_CITY_RECOMMENDATION_FALLBACKS: dict[str, list[dict[str, str]]] = {
+    "pattaya": [
+        {
+            "name": "Sanctuary of Truth",
+            "description": "全木雕海边神殿，建筑细节非常丰富，是芭堤雅最有代表性的地标之一。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/82/Sanctuary_of_Truth_Pattaya.jpg",
+            "ticket_price": "THB 500",
+        },
+        {
+            "name": "Nong Nooch Tropical Garden",
+            "description": "大型热带园林和文化表演园区，适合半日到一日游。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/0/06/Nong_Nooc_Tropical_Garden.jpg",
+            "ticket_price": "THB 600",
+        },
+        {
+            "name": "Pattaya Floating Market",
+            "description": "水上市集结合小吃与表演，适合体验泰式旅游氛围。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/2/22/Pattaya_Floating_Market.jpg",
+            "ticket_price": "THB 200",
+        },
+        {
+            "name": "Big Buddha Temple",
+            "description": "山顶金色大佛与观景台适合看芭堤雅城区和海湾景色。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/7/71/Wat_Phra_Yai_Pattaya.jpg",
+            "ticket_price": "THB 100",
+        },
+        {
+            "name": "Art in Paradise Pattaya",
+            "description": "互动式3D美术馆，适合拍照和亲子行程。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/9/92/Art_in_Paradise_Pattaya.jpg",
+            "ticket_price": "THB 400",
+        },
+    ],
+    "bangkok": [
+        {
+            "name": "The Grand Palace",
+            "description": "泰国皇室代表性建筑群，首次到曼谷几乎都会安排参观。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Grand_Palace_Bangkok.jpg",
+            "ticket_price": "THB 500",
+        },
+        {
+            "name": "Wat Pho",
+            "description": "以卧佛闻名的大型寺庙群，历史底蕴浓厚。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/1/1e/Wat_Pho_Bangkok.jpg",
+            "ticket_price": "THB 300",
+        },
+        {
+            "name": "Wat Arun",
+            "description": "临河的曼谷经典寺庙，傍晚拍照尤其出片。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Wat_Arun_Bangkok.jpg",
+            "ticket_price": "THB 200",
+        },
+        {
+            "name": "Jim Thompson House Museum",
+            "description": "泰丝文化与传统建筑结合的博物馆型景点。",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/9/95/Jim_Thompson_House.jpg",
+            "ticket_price": "THB 200",
+        },
+    ],
 }
 
 
@@ -179,6 +275,10 @@ def _clean_ticket_price(value: Any) -> str:
 
     if re.search(r"\bRM\b", text, re.IGNORECASE):
         return text.replace("--", "-").replace("MYR", "RM").strip()
+    if re.search(r"\b(THB|MYR|USD|SGD|HKD|CNY|JPY|EUR)\b", text, re.IGNORECASE):
+        return re.sub(r"\s+", " ", text).strip()
+    if re.search(r"[¥฿$€]", text):
+        return re.sub(r"\s+", " ", text).strip()
     return ""
 
 
@@ -256,6 +356,98 @@ def _seed_recommendation_candidates(city: str, candidates: list[dict[str, Any]])
     return seeded
 
 
+def _city_fallback_candidates(city: str) -> list[dict[str, Any]]:
+    fallback_rows = _CITY_RECOMMENDATION_FALLBACKS.get(str(city or "").strip().lower(), [])
+    result: list[dict[str, Any]] = []
+    for row in fallback_rows:
+        result.append(
+            {
+                "name": row["name"],
+                "description": row["description"],
+                "image": row["image"],
+                "ticket_price": row["ticket_price"],
+                "source_link": row["image"],
+            }
+        )
+    return result
+
+
+def _is_thin_recommendation_candidate(item: dict[str, Any]) -> bool:
+    description = _compact_description(item.get("description") or item.get("brief_description"))
+    image = str(item.get("image") or item.get("image_url") or "").strip()
+    ticket_price = _clean_ticket_price(item.get("ticket_price"))
+    return not any([description, image, ticket_price])
+
+
+def _needs_recommendation_enrichment(item: dict[str, Any]) -> bool:
+    description = _compact_description(item.get("description") or item.get("brief_description"))
+    image = str(item.get("image") or item.get("image_url") or "").strip()
+    ticket_price = _clean_ticket_price(item.get("ticket_price"))
+    return not all([description, image, ticket_price])
+
+
+def _merge_recommendation_detail(candidate: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(candidate)
+    if not _compact_description(merged.get("description") or merged.get("brief_description")):
+        merged["description"] = _compact_description(detail.get("description"))
+    if not str(merged.get("image") or merged.get("image_url") or "").strip():
+        merged["image"] = str(detail.get("image_url") or detail.get("image") or "").strip()
+    if not _clean_ticket_price(merged.get("ticket_price")):
+        merged["ticket_price"] = _clean_ticket_price(detail.get("ticket_price"))
+    if not merged.get("source_link") and str(detail.get("source_link") or "").strip():
+        merged["source_link"] = str(detail.get("source_link") or "").strip()
+    detail_sources = detail.get("sources") or []
+    if not merged.get("source_link") and isinstance(detail_sources, list):
+        for src in detail_sources:
+            if isinstance(src, dict):
+                link = str(src.get("link", "")).strip()
+            else:
+                link = str(src).strip()
+            if link:
+                merged["source_link"] = link
+                break
+    return merged
+
+
+def _enrich_recommendation_candidates(city: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    fallback_by_name = {
+        row["name"].strip().lower(): row
+        for row in _city_fallback_candidates(city)
+        if isinstance(row, dict) and row.get("name")
+    }
+
+    for index, item in enumerate(candidates):
+        candidate = dict(item)
+        fallback_row = fallback_by_name.get(str(candidate.get("name", "")).strip().lower())
+        if fallback_row:
+            candidate = _merge_recommendation_detail(candidate, fallback_row)
+
+        if index < 5 and _needs_recommendation_enrichment(candidate):
+            try:
+                detail = get_attraction_info(
+                    attraction_name=str(candidate.get("name", "")).strip(),
+                    location=city or None,
+                )
+            except Exception:
+                detail = {}
+            if isinstance(detail, dict):
+                candidate = _merge_recommendation_detail(candidate, detail)
+        enriched.append(candidate)
+
+    if not enriched or all(_is_thin_recommendation_candidate(item) for item in enriched):
+        return _city_fallback_candidates(city)
+
+    seen = {str(item.get("name", "")).strip().lower() for item in enriched if item.get("name")}
+    for row in _city_fallback_candidates(city):
+        key = str(row.get("name", "")).strip().lower()
+        if key and key not in seen and len(enriched) < 8:
+            enriched.append(row)
+            seen.add(key)
+
+    return enriched
+
+
 def _normalize_recommendation_candidate(item: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
     if not isinstance(item, dict):
         return None, ""
@@ -286,6 +478,7 @@ def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
         city=city,
         candidates=get_attractions_by_place(place=city, query_type=query),
     )
+    candidates = _enrich_recommendation_candidates(city=city, candidates=candidates)
 
     attractions: list[dict[str, str]] = []
     sources: list[str] = []
