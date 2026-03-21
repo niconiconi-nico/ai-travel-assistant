@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -18,8 +19,11 @@ _CACHE_LOCK = threading.Lock()
 _EXACT_PRICE_PATTERNS = [
     r"(?:RM|MYR)\s+\d+(?:[\.,]\d{1,2})?",
     r"USD\s+\d+(?:[\.,]\d{1,2})?",
+    r"\$\s?\d+(?:[\.,]\d{1,2})?",
     r"(?:CNY|RMB)\s+\d+(?:[\.,]\d{1,2})?",
+    r"(?:CNY|RMB)\s*\d+(?:[\.,]\d{1,2})?\s*元?",
     r"[¥]\s?\d+(?:[\.,]\d{1,2})?",
+    r"\d+(?:[\.,]\d{1,2})?\s*元",
 ]
 _FROM_PRICE_PATTERNS = [
     r"(?:from|starting\s+from|adult\s+ticket)\s*(?:at\s*)?(?:RM|MYR|USD|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?",
@@ -64,7 +68,7 @@ def _debug_enabled() -> bool:
 
 def _debug_log(message: str) -> None:
     if _debug_enabled():
-        print(f"[attraction_tool][debug] {message}")
+        print(f"[attraction_tool][debug] {message}", file=sys.stderr)
 
 
 def _normalize_text(value: Any) -> str:
@@ -73,6 +77,115 @@ def _normalize_text(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return str(value).strip()
+
+
+_ATTRACTION_ALIAS_OVERRIDES: dict[str, list[str]] = {
+    "forbidden city": ["the palace museum", "palace museum", "故宫", "故宫博物院", "紫禁城"],
+    "the palace museum": ["forbidden city", "故宫", "故宫博物院", "紫禁城"],
+    "temple of heaven": ["temple of heaven park", "天坛", "天坛公园"],
+    "summer palace": ["颐和园"],
+    "mutianyu great wall": ["长城", "慕田峪长城", "mutianyu"],
+    "badaling great wall": ["长城", "八达岭长城", "badaling"],
+    "beijing ancient observatory": ["北京古观象台", "古观象台", "ancient observatory"],
+    "北京古观象台": ["beijing ancient observatory", "古观象台", "ancient observatory"],
+}
+
+_CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {
+    "beijing": [
+        "forbidden city",
+        "the palace museum",
+        "temple of heaven",
+        "summer palace",
+        "mutianyu great wall",
+        "badaling great wall",
+        "great wall",
+        "故宫",
+        "故宫博物院",
+        "天坛",
+        "颐和园",
+        "长城",
+    ]
+}
+
+
+def _normalize_match_text(value: Any) -> str:
+    text = _normalize_text(value).lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
+def _build_attraction_aliases(attraction_name: str, aliases: list[str] | None = None) -> list[str]:
+    raw_values = [attraction_name, *(aliases or [])]
+    seed = _normalize_match_text(attraction_name)
+    if seed in _ATTRACTION_ALIAS_OVERRIDES:
+        raw_values.extend(_ATTRACTION_ALIAS_OVERRIDES[seed])
+
+    expanded: list[str] = []
+    for value in raw_values:
+        normalized = _normalize_match_text(value)
+        if not normalized:
+            continue
+        expanded.append(normalized)
+        if " " in normalized:
+            expanded.append(normalized.split(" (")[0].strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in expanded:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
+def is_source_relevant_to_attraction(
+    attraction_name: str,
+    source_title: str,
+    source_snippet: str,
+    page_text: str | None = None,
+    aliases: list[str] | None = None,
+) -> bool:
+    alias_values = _build_attraction_aliases(attraction_name, aliases=aliases)
+    if not alias_values:
+        return False
+
+    title_text = _normalize_match_text(source_title)
+    snippet_text = _normalize_match_text(source_snippet)
+    page_match_text = _normalize_match_text(page_text) if page_text else ""
+    combined_text = " ".join(part for part in [title_text, snippet_text, page_match_text] if part).strip()
+
+    def _contains_alias(text: str) -> bool:
+        if not text:
+            return False
+        for alias in alias_values:
+            if alias in text:
+                return True
+        return False
+
+    if _contains_alias(title_text) or _contains_alias(snippet_text):
+        return True
+
+    if page_match_text:
+        compact_aliases = [alias for alias in alias_values if len(alias) >= 4]
+        for alias in compact_aliases:
+            if page_match_text.count(alias) >= 1:
+                return True
+
+    other_aliases: set[str] = set()
+    target_alias_set = set(alias_values)
+    for base_name, alias_list in _ATTRACTION_ALIAS_OVERRIDES.items():
+        normalized_base = _normalize_match_text(base_name)
+        if normalized_base not in target_alias_set:
+            other_aliases.add(normalized_base)
+        for alias in alias_list:
+            normalized_alias = _normalize_match_text(alias)
+            if normalized_alias and normalized_alias not in target_alias_set:
+                other_aliases.add(normalized_alias)
+
+    if combined_text and any(alias in combined_text for alias in other_aliases if len(alias) >= 4):
+        return False
+
+    return True
 
 
 def _load_cache() -> dict[str, dict[str, Any]]:
@@ -347,9 +460,13 @@ def _normalize_currency(value: str) -> str:
     upper = value.upper()
     if "MYR" in upper or re.search(r"\bRM\b", upper):
         return "MYR"
+    if "$" in value:
+        return "USD"
     if "USD" in upper:
         return "USD"
     if "CNY" in upper or "RMB" in upper:
+        return "CNY"
+    if "元" in value:
         return "CNY"
     if "EUR" in upper:
         return "EUR"
@@ -601,12 +718,23 @@ def fetch_nominatim_place(attraction_name: str, location: str | None = None) -> 
     }
 
 
-def _collect_price_candidates_from_sources(sources: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _collect_price_candidates_from_sources(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for source in sources:
         snippet = _normalize_text(source.get("snippet"))
         title = _normalize_text(source.get("title"))
         link = _normalize_text(source.get("link"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         combined = f"{title} {snippet}".strip()
         if not combined:
             continue
@@ -678,11 +806,22 @@ def _is_strong_ticket_source_type(source_type: str) -> bool:
     }
 
 
-def _has_strong_ticket_source_evidence(sources: list[dict[str, str]]) -> bool:
+def _has_strong_ticket_source_evidence(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> bool:
     for src in sources:
         title = _normalize_text(src.get("title"))
         link = _normalize_text(src.get("link"))
         snippet = _normalize_text(src.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         source_type, _ = _classify_source_type(title=title, link=link, snippet=snippet)
         if _is_strong_ticket_source_type(source_type):
             return True
@@ -849,12 +988,23 @@ def _pick_ticket_price_from_values(values: list[dict[str, Any]]) -> str:
     return ""
 
 
-def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_name: str = "") -> str:
+def resolve_ticket_price_from_sources(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> str:
     ranked = []
     for src in sources:
         title = _normalize_text(src.get("title"))
         link = _normalize_text(src.get("link"))
         snippet = _normalize_text(src.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         if not _looks_like_ticket_source(title, link, snippet):
             continue
         source_type, score = _classify_source_type(title=title, link=link, snippet=snippet)
@@ -870,6 +1020,14 @@ def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_
             all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
 
         page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
         if page_text and len(page_text) >= 20:
             all_values.extend(_extract_strong_ticket_values(page_text, attraction_name=attraction_name))
         elif source_type == "ota_product_page" and combined:
@@ -919,11 +1077,10 @@ def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
 
     if ticket_price and ticket_price != "Free":
         ticket_price = ticket_price.replace("-", "–")
-        if re.fullmatch(r"\$\s*\d+(?:\.\d{1,2})?", ticket_price):
-            usd_value = float(re.findall(r"\d+(?:\.\d{1,2})?", ticket_price)[0])
-            converted = convert_to_myr(usd_value, "USD")
-            ticket_price = _format_rm_clean(converted) if converted is not None else ""
-        if not _is_valid_ticket_price_output(ticket_price):
+        normalized_ticket_price = normalize_ticket_price(ticket_price)
+        if normalized_ticket_price:
+            ticket_price = normalized_ticket_price
+        elif not _is_valid_ticket_price_output(ticket_price):
             ticket_price = ""
 
     if ticket_price == "Free":
@@ -944,6 +1101,7 @@ def resolve_ticket_price_with_gemini(
     location: str | None,
     sources: list[dict[str, str]],
     rule_based_price: str = "",
+    aliases: list[str] | None = None,
 ) -> dict[str, str]:
     api_key = _resolve_gemini_api_key()
     _debug_log(f"gemini_api_key_found={bool(api_key)}")
@@ -955,6 +1113,13 @@ def resolve_ticket_price_with_gemini(
         title = _normalize_text(source.get("title"))
         link = _normalize_text(source.get("link"))
         snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         source_type, source_score = _classify_source_type(title=title, link=link, snippet=snippet)
         if not _looks_like_ticket_source(title, link, snippet) and source_type not in {
             "official_homepage",
@@ -969,6 +1134,14 @@ def resolve_ticket_price_with_gemini(
         _debug_log(f"ticket_source_selected url={link} source_type={source_type} score={source_score}")
         page_text = _fetch_url_text(link)
         _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
         if len(page_text) < 20 and source_type not in {"ota_product_page", "official_homepage", "official_visitor_info", "official_faq"}:
             continue
         if len(page_text) < 40 and not snippet:
@@ -1012,6 +1185,7 @@ def resolve_ticket_price_with_gemini(
         "Do not browse. Do not guess. Do not use outside knowledge. "
         "If uncertain, return empty ticket_price. "
         "Focus on main attraction admission, avoid packages/add-ons/sub-attractions. "
+        "Final displayed ticket_price must be in RM using approximate built-in conversion when the source is not already in MYR/RM. "
         "Return JSON only with shape: "
         '{"ticket_price":"PRICE_OR_EMPTY","price_type":"official|third_party|free|range|unknown","price_note":"SHORT_REASON"}. '
         "Allowed ticket_price forms: RM 16, RM 16–RM 30, Free, or ''."
@@ -1053,7 +1227,12 @@ def _classify_platform(link: str, title: str = "") -> str:
     return "other"
 
 
-def collect_preferred_sources(results: list[dict[str, Any]], min_count: int = 3) -> list[dict[str, str]]:
+def collect_preferred_sources(
+    results: list[dict[str, Any]],
+    min_count: int = 3,
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, str]]:
     ranked: list[tuple[int, dict[str, str]]] = []
     seen_links: set[str] = set()
 
@@ -1062,6 +1241,13 @@ def collect_preferred_sources(results: list[dict[str, Any]], min_count: int = 3)
         link = _normalize_text(item.get("link"))
         snippet = _normalize_text(item.get("snippet") or item.get("snippet_highlighted_words"))
         if not (title or link or snippet):
+            continue
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
             continue
 
         dedup_key = link or title.lower()
@@ -1473,6 +1659,12 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
         score += 1
     if any(token in name.lower() for token in ["museum", "temple", "hill", "fort", "heritage", "park", "tower"]):
         score += 1
+    for city_key, iconic_terms in _CITY_ICONIC_ATTRACTIONS.items():
+        if city_key in city.lower():
+            normalized_name = _normalize_match_text(name)
+            if any(term in normalized_name for term in iconic_terms):
+                score += 5
+            break
     return score
 
 
@@ -1728,6 +1920,7 @@ def get_attraction_info(
     enrichment_mode: str = "detail",
 ) -> dict[str, Any]:
     attraction_name = attraction_name.strip()
+    attraction_aliases = _build_attraction_aliases(attraction_name)
     result: dict[str, Any] = {
         "query_type": "attraction_info",
         "name": attraction_name,
@@ -1808,7 +2001,12 @@ def get_attraction_info(
                 text_blobs.append(_normalize_text(item.get("title")))
                 text_blobs.append(_normalize_text(item.get("snippet")))
 
-        preferred_sources = collect_preferred_sources(all_organic, min_count=3)
+        preferred_sources = collect_preferred_sources(
+            all_organic,
+            min_count=3,
+            attraction_name=attraction_name,
+            aliases=attraction_aliases,
+        )
         opening_hour_text_blobs: list[str] = []
         for src in preferred_sources:
             title = _normalize_text(src.get("title"))
@@ -1833,21 +2031,34 @@ def get_attraction_info(
             )
             _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
-            has_strong_ticket_sources = _has_strong_ticket_source_evidence(preferred_sources)
-            if enrichment_mode == "recommendation" and not has_strong_ticket_sources:
+            has_strong_ticket_sources = _has_strong_ticket_source_evidence(
+                preferred_sources,
+                attraction_name=attraction_name,
+                aliases=attraction_aliases,
+            )
+            if not preferred_sources:
+                result["ticket_price"] = ""
+                result["price_type"] = "unknown"
+                result["price_note"] = "No attraction-specific ticket source found."
+            elif enrichment_mode == "recommendation" and not has_strong_ticket_sources:
                 _debug_log("ticket_price_enrichment=skipped_due_to_weak_sources")
                 result["ticket_price"] = ""
                 result["price_type"] = "unknown"
                 result["price_note"] = "Skipped in recommendation mode due to weak ticket sources."
             else:
                 _debug_log("ticket_price_enrichment=attempted_due_to_strong_ticket_sources")
-                strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
+                strong_price = resolve_ticket_price_from_sources(
+                    preferred_sources,
+                    attraction_name=attraction_name,
+                    aliases=attraction_aliases,
+                )
                 _debug_log(f"rule_based_price={strong_price}")
                 gemini_price = resolve_ticket_price_with_gemini(
                     attraction_name=attraction_name,
                     location=location,
                     sources=preferred_sources,
                     rule_based_price=strong_price,
+                    aliases=attraction_aliases,
                 )
                 gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
                 if gemini_ticket_price:
@@ -1861,7 +2072,11 @@ def get_attraction_info(
                     result["price_note"] = "Parsed from ticket-related source content"
                     _debug_log("ticket_price_path=rule_based_fallback")
                 else:
-                    price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+                    price_candidates = _collect_price_candidates_from_sources(
+                        preferred_sources,
+                        attraction_name=attraction_name,
+                        aliases=attraction_aliases,
+                    )
                     _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
                     price_resolution = resolve_ticket_price(price_candidates)
                     result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))

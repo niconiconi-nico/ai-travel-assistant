@@ -27,6 +27,22 @@ from attraction_tool import (  # noqa: E402
 )
 
 
+_CITY_RECOMMENDATION_SEEDS: dict[str, list[str]] = {
+    "beijing": [
+        "Forbidden City",
+        "Temple of Heaven",
+        "Summer Palace",
+        "Mutianyu Great Wall",
+    ],
+    "北京": [
+        "Forbidden City",
+        "Temple of Heaven",
+        "Summer Palace",
+        "Mutianyu Great Wall",
+    ],
+}
+
+
 @tool
 def attraction_recommendation_tool(city: str, query_hint: str = "") -> dict[str, Any]:
     """Return attraction candidates by city."""
@@ -200,6 +216,14 @@ def _build_recommendation_from_city(city: str, query: str) -> dict[str, Any]:
         seed_names = ["Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"]
         existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
         for seed in seed_names:
+            if seed.lower() not in existing:
+                candidates.append({"name": seed, "brief_description": "", "source_link": ""})
+                existing.add(seed.lower())
+
+    city_seed_names = _CITY_RECOMMENDATION_SEEDS.get(city.lower(), []) or _CITY_RECOMMENDATION_SEEDS.get(city, [])
+    if len(candidates) < 4 and city_seed_names:
+        existing = {str(item.get("name", "")).strip().lower() for item in candidates if isinstance(item, dict)}
+        for seed in city_seed_names:
             if seed.lower() not in existing:
                 candidates.append({"name": seed, "brief_description": "", "source_link": ""})
                 existing.add(seed.lower())

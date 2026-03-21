@@ -221,7 +221,9 @@ def test_opening_hours_and_ticket_price_cleaning(monkeypatch):
 
     monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
     monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
-    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_v2.json"))
+    cache_path = Path("/tmp/attraction_tool_test_cache_v2.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
 
     result = attraction_tool.get_attraction_info("Demo Tower", "Demo City")
 
@@ -260,7 +262,9 @@ def test_ticket_price_normalized_to_myr(monkeypatch):
 
     monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
     monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
-    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_v3.json"))
+    cache_path = Path("/tmp/attraction_tool_test_cache_v3.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
 
     result = attraction_tool.get_attraction_info("Demo Museum", "Kuala Lumpur")
 
@@ -540,13 +544,15 @@ def test_get_attraction_info_prefers_gemini_ticket_resolution(monkeypatch):
     monkeypatch.setattr(
         attraction_tool,
         "resolve_ticket_price_with_gemini",
-        lambda attraction_name, location, sources, rule_based_price="": {
+        lambda attraction_name, location, sources, rule_based_price="", aliases=None: {
             "ticket_price": "RM 30",
             "price_type": "official",
             "price_note": "resolved by gemini",
         },
     )
-    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_gemini.json"))
+    cache_path = Path("/tmp/attraction_tool_test_cache_gemini.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
 
     result = attraction_tool.get_attraction_info("Demo Attraction", "KL")
 
@@ -669,6 +675,16 @@ def test_debug_logging_disabled_by_default(monkeypatch, capsys):
     assert captured.out == ""
 
 
+def test_debug_logging_goes_to_stderr_when_enabled(monkeypatch, capsys):
+    monkeypatch.setenv("ATTRACTION_TOOL_DEBUG", "true")
+
+    attraction_tool._debug_log("visible-message")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "visible-message" in captured.err
+
+
 
 def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
@@ -700,3 +716,61 @@ def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
     result = attraction_tool.get_attractions_by_place("Beijing")
 
     assert [item["name"] for item in result] == ["Temple of Heaven Park"]
+
+
+def test_parse_gemini_ticket_payload_converts_cny_to_rm():
+    raw = """```json
+{"ticket_price":"成人20元/人","price_type":"official","price_note":"gov page"}
+```"""
+
+    parsed = attraction_tool._parse_gemini_ticket_payload(raw)
+
+    assert parsed["ticket_price"].startswith("RM")
+    assert parsed["price_type"] == "official"
+
+
+def test_get_attraction_info_rejects_wrong_attraction_ticket_source(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        attraction_tool,
+        "fetch_wikipedia_summary",
+        lambda attraction_name, location=None: {
+            "description": "Observatory in Beijing.",
+            "image_url": "https://img.example.com/observatory.jpg",
+            "source_url": "https://example.com/wiki/observatory",
+        },
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "fetch_nominatim_place",
+        lambda attraction_name, location=None: {"display_name": "Beijing Ancient Observatory", "osm_url": ""},
+    )
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "knowledge_graph": {},
+            "answer_box": {},
+            "organic_results": [
+                {
+                    "title": "Temple of Heaven - Beijing",
+                    "link": "https://english.beijing.gov.cn/specials/parktours/guidevisitors/templeofheaven/",
+                    "snippet": "Temple of Heaven admission 10元 to 28元.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+    monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: "Temple of Heaven ticket prices 10元, 14元, 28元.",
+    )
+    cache_path = Path("/tmp/attraction_tool_test_cache_wrong_source.json")
+    cache_path.unlink(missing_ok=True)
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", cache_path)
+
+    result = attraction_tool.get_attraction_info("Beijing Ancient Observatory", "Beijing")
+
+    assert result["ticket_price"] == ""
