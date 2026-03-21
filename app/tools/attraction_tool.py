@@ -2176,6 +2176,135 @@ def _collect_search_recommendation_candidates(
     return candidates
 
 
+def _search_wikipedia_titles(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    params = urllib.parse.urlencode(
+        {
+            "action": "query",
+            "list": "search",
+            "format": "json",
+            "utf8": 1,
+            "srsearch": query,
+            "srlimit": max(1, min(limit, 10)),
+        }
+    )
+    url = f"https://en.wikipedia.org/w/api.php?{params}"
+    data = _http_get_json(url, headers={"Accept": "application/json", "User-Agent": "ai-travel-assistant/1.0"})
+    if not isinstance(data, dict):
+        return []
+    query_payload = data.get("query", {})
+    results = query_payload.get("search", []) if isinstance(query_payload, dict) else []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def _collect_wikipedia_recommendation_candidates(
+    place: str,
+    seen_names: set[str],
+    query_hint: str = "",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    search_queries = []
+    if query_hint:
+        search_queries.append(query_hint)
+    search_queries.extend(
+        [
+            f"{place} landmarks",
+            f"{place} attractions",
+            f"{place} tourism",
+            f"{place} museums",
+            f"{place} historic sites",
+        ]
+    )
+
+    seen_titles: set[str] = set()
+    for query in search_queries:
+        for item in _search_wikipedia_titles(query, limit=8):
+            title = _normalize_text(item.get("title"))
+            title_key = title.lower()
+            if not title or title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+
+            name = _clean_recommendation_candidate_name(title)
+            if not _is_plausible_attraction_name(name):
+                continue
+
+            lowered_name = name.lower()
+            if any(token in lowered_name for token in ["tourism in ", "list of ", "history of ", "transport in "]):
+                continue
+            if lowered_name in seen_names:
+                continue
+
+            summary = fetch_wikipedia_summary(name, location=place)
+            description = _normalize_text(summary.get("description"))
+            if _has_placeholder_description(description):
+                description = ""
+
+            candidate = {
+                "name": name,
+                "description": description,
+                "image": _normalize_text(summary.get("image_url")),
+                "ticket_price": "",
+                "sources": [_normalize_text(summary.get("source_url"))] if _normalize_text(summary.get("source_url")) else [],
+                "source_type": "wikipedia",
+            }
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            seen_names.add(lowered_name)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _collect_offline_catalog_recommendation_candidates(
+    place: str,
+    seen_names: set[str],
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    try:
+        from tools import TRAVEL_ATTRACTION_CATALOG
+    except Exception:
+        return []
+
+    place_key = _normalize_text(place).split(",", 1)[0].strip().lower()
+    catalog = TRAVEL_ATTRACTION_CATALOG.get(place_key, [])
+    if not isinstance(catalog, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for row in catalog:
+        if not isinstance(row, dict):
+            continue
+        name = _normalize_text(row.get("name"))
+        if not _is_plausible_attraction_name(name):
+            continue
+        lowered_name = name.lower()
+        if lowered_name in seen_names:
+            continue
+        seen_names.add(lowered_name)
+
+        price_value = row.get("price", 0)
+        currency = _normalize_text(row.get("currency"))
+        ticket_price = "Free"
+        if isinstance(price_value, (int, float)) and float(price_value) > 0:
+            formatted_price = int(price_value) if float(price_value).is_integer() else round(float(price_value), 2)
+            ticket_price = f"{currency} {formatted_price}".strip()
+
+        candidate = {
+            "name": name,
+            "description": _normalize_text(row.get("information")),
+            "image": _normalize_text(row.get("image")),
+            "ticket_price": ticket_price,
+            "sources": [],
+            "source_type": "offline_catalog",
+        }
+        candidate["score"] = _recommendation_quality_score(candidate, place)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            return candidates
+    return candidates
+
+
 def get_attractions_by_place(place: str, query_type: str | None = None) -> list[dict[str, str]]:
     query_hint = _normalize_text(query_type)
     place = _canonicalize_place_name(place)
@@ -2223,6 +2352,24 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
         if len(candidates) >= 14:
             break
 
+    if len(candidates) < 4:
+        candidates.extend(
+            _collect_wikipedia_recommendation_candidates(
+                place=place,
+                seen_names=seen_names,
+                query_hint=query_hint,
+                limit=max(4, 12 - len(candidates)),
+            )
+        )
+    if len(candidates) < 4:
+        candidates.extend(
+            _collect_offline_catalog_recommendation_candidates(
+                place=place,
+                seen_names=seen_names,
+                limit=max(4, 12 - len(candidates)),
+            )
+        )
+
     candidates = [c for c in candidates if _is_plausible_attraction_name(_normalize_text(c.get("name")))]
     candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
     normalized = normalize_recommendations_with_gemini(user_query=query_hint or place, city=place, candidates=candidates[:14])
@@ -2243,6 +2390,8 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
             {
                 "name": name,
                 "brief_description": desc,
+                "image": _normalize_text(item.get("image")),
+                "ticket_price": _normalize_text(item.get("ticket_price")),
                 "source_link": source_link,
             }
         )

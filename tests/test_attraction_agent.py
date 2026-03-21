@@ -75,25 +75,6 @@ def test_build_recommendation_from_city_enriches_thin_candidates_with_detail(mon
     ]
     assert result["sources"] == ["https://example.com/petronas"]
 
-
-def test_build_recommendation_from_city_uses_pattaya_fallback_when_search_is_empty(monkeypatch):
-    monkeypatch.setattr(attraction_agent, "get_attractions_by_place", lambda place, query_type=None: [])
-
-    def fail_get_attraction_info(*args, **kwargs):
-        raise AssertionError("fallback recommendations should not require detail lookup")
-
-    monkeypatch.setattr(attraction_agent, "get_attraction_info", fail_get_attraction_info)
-
-    result = attraction_agent._build_recommendation_from_city("Pattaya", "Pattaya有什么好玩的景点")
-
-    assert len(result["attractions"]) >= 4
-    assert result["attractions"][0]["name"] == "Sanctuary of Truth"
-    assert result["attractions"][0]["description"]
-    assert result["attractions"][0]["image"].startswith("https://")
-    assert result["attractions"][0]["ticket_price"] == "THB 500"
-    assert result["sources"]
-
-
 def test_normalize_info_preserves_ticket_status_and_price_note():
     normalized = attraction_agent._normalize_info(
         {

@@ -857,6 +857,67 @@ def test_get_attractions_by_place_canonicalizes_chinese_city_name(monkeypatch):
     assert queries[0].startswith("Kuala Lumpur, Malaysia")
 
 
+def test_get_attractions_by_place_uses_generic_wikipedia_fallback_when_search_and_osm_are_empty(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=14: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "_search_wikipedia_titles",
+        lambda query, limit=8: [
+            {"title": "Tokyo Tower"},
+            {"title": "Sensō-ji"},
+            {"title": "Tourism in Tokyo"},
+        ],
+    )
+
+    def fake_wikipedia_summary(attraction_name: str, location=None):
+        summaries = {
+            "Tokyo Tower": {
+                "description": "Observation tower and major Tokyo landmark.",
+                "image_url": "https://img.example.com/tokyo-tower.jpg",
+                "source_url": "https://example.com/wiki/tokyo-tower",
+            },
+            "Sensō-ji": {
+                "description": "Historic Buddhist temple in Tokyo.",
+                "image_url": "https://img.example.com/sensoji.jpg",
+                "source_url": "https://example.com/wiki/sensoji",
+            },
+        }
+        return summaries.get(attraction_name, {"description": "", "image_url": "", "source_url": ""})
+
+    monkeypatch.setattr(attraction_tool, "fetch_wikipedia_summary", fake_wikipedia_summary)
+
+    result = attraction_tool.get_attractions_by_place("Tokyo")
+
+    names = [item["name"] for item in result]
+    assert "Tokyo Tower" in names
+    assert "Sensō-ji" in names
+    tokyo_tower = next(item for item in result if item["name"] == "Tokyo Tower")
+    assert tokyo_tower["brief_description"] == "Observation tower and major Tokyo landmark."
+    assert all(item["name"] != "Tourism in Tokyo" for item in result)
+
+
+def test_get_attractions_by_place_uses_offline_catalog_when_external_sources_fail(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=14: [])
+    monkeypatch.setattr(attraction_tool, "_search_wikipedia_titles", lambda query, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    result = attraction_tool.get_attractions_by_place("Tokyo")
+
+    assert [item["name"] for item in result[:2]] == ["Tokyo Tower", "Sensō-ji"]
+    assert result[0]["brief_description"]
+
+
 def test_parse_gemini_ticket_payload_converts_cny_to_rm():
     raw = """```json
 {"ticket_price":"成人20元/人","price_type":"official","price_note":"gov page"}
