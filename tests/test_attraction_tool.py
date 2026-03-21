@@ -783,6 +783,57 @@ def test_get_attractions_by_place_queries_serpapi_before_osm_only_lists(monkeypa
     assert result[0]["name"] == "Petronas Twin Towers"
 
 
+def test_get_attractions_by_place_uses_gemini_to_extract_entities_from_list_articles(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "organic_results": [
+                {
+                    "title": "THE 10 BEST Kuala Lumpur Sights & Landmarks",
+                    "link": "https://example.com/kl-list",
+                    "snippet": "Petronas Twin Towers, KL Tower, Batu Caves and Central Market are must-visit stops.",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+    monkeypatch.setattr(
+        attraction_tool,
+        "_extract_search_candidates_with_gemini",
+        lambda place, query, organic_results: [
+            {
+                "name": "Petronas Twin Towers",
+                "description": "Iconic twin-tower landmark in central Kuala Lumpur.",
+                "image": "",
+                "ticket_price": "",
+                "sources": ["https://example.com/kl-list"],
+                "source_type": "serpapi",
+            },
+            {
+                "name": "KL Tower",
+                "description": "Observation tower with city views.",
+                "image": "",
+                "ticket_price": "",
+                "sources": ["https://example.com/kl-list"],
+                "source_type": "serpapi",
+            },
+        ],
+    )
+
+    result = attraction_tool.get_attractions_by_place("Kuala Lumpur")
+
+    assert [item["name"] for item in result[:2]] == ["Petronas Twin Towers", "KL Tower"]
+    assert all("BEST Kuala Lumpur" not in item["name"] for item in result)
+
+
 def test_get_attractions_by_place_canonicalizes_chinese_city_name(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
     monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])

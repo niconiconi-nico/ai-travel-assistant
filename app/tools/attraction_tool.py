@@ -1750,6 +1750,113 @@ def _parse_recommendation_gemini_payload(raw_text: str) -> list[dict[str, str]]:
     return normalized
 
 
+def _parse_search_candidate_gemini_payload(raw_text: str) -> list[dict[str, Any]]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return []
+    if "```" in text:
+        text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    attractions = payload.get("attractions", []) if isinstance(payload.get("attractions"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for item in attractions:
+        if not isinstance(item, dict):
+            continue
+        source_index = item.get("source_index")
+        normalized.append(
+            {
+                "name": _normalize_text(item.get("name")),
+                "description": _normalize_text(item.get("description")),
+                "source_index": source_index if isinstance(source_index, int) else -1,
+            }
+        )
+    return normalized
+
+
+def _extract_search_candidates_with_gemini(
+    place: str,
+    query: str,
+    organic_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    api_key = _resolve_gemini_api_key()
+    if not api_key or not organic_results:
+        return []
+
+    payload = {
+        "city": place,
+        "query": _normalize_text(query),
+        "results": [
+            {
+                "source_index": index,
+                "title": _normalize_text(item.get("title")),
+                "snippet": _normalize_text(item.get("snippet")),
+                "link": _normalize_text(item.get("link")),
+            }
+            for index, item in enumerate(organic_results[:8])
+            if isinstance(item, dict)
+        ],
+    }
+    if not payload["results"]:
+        return []
+
+    prompt = (
+        "You extract actual attraction entities from search results for a travel recommendation system. "
+        "Use ONLY the provided titles/snippets/links. Never invent attraction names. "
+        "If a result is a list article, extract the specific attraction names explicitly mentioned in that title/snippet. "
+        "Ignore generic article titles that do not clearly mention a real attraction. "
+        "Descriptions must be short summaries based only on the source snippet. "
+        "Return JSON only in shape: "
+        '{"attractions":[{"name":"","description":"","source_index":0}]}.'
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        _debug_log("search_candidate_gemini_call_failed=True")
+        return []
+
+    raw = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"search_candidate_gemini_raw={raw[:500]}")
+    parsed = _parse_search_candidate_gemini_payload(raw)
+
+    extracted: list[dict[str, Any]] = []
+    for item in parsed:
+        name = _clean_recommendation_candidate_name(item.get("name", ""))
+        if not name or not _is_plausible_attraction_name(name):
+            continue
+        source_index = item.get("source_index", -1)
+        source_item = organic_results[source_index] if isinstance(source_index, int) and 0 <= source_index < len(organic_results) else {}
+        link = _normalize_text(source_item.get("link")) if isinstance(source_item, dict) else ""
+        extracted.append(
+            {
+                "name": name,
+                "description": _normalize_text(item.get("description")),
+                "image": "",
+                "ticket_price": "",
+                "sources": [link] if link else [],
+                "source_type": "serpapi",
+            }
+        )
+    return extracted
+
+
 def normalize_recommendations_with_gemini(
     user_query: str,
     city: str,
@@ -1858,7 +1965,21 @@ def _collect_search_recommendation_candidates(
         except Exception:
             continue
 
-        for item in payload.get("organic_results", [])[:10]:
+        organic_results = payload.get("organic_results", [])[:10]
+        gemini_candidates = _extract_search_candidates_with_gemini(place=place, query=query, organic_results=organic_results)
+        for candidate in gemini_candidates:
+            name_key = _normalize_text(candidate.get("name")).lower()
+            if not name_key or name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+        if gemini_candidates:
+            continue
+
+        for item in organic_results:
             title = _normalize_text(item.get("title"))
             link = _normalize_text(item.get("link"))
             snippet = _normalize_text(item.get("snippet"))
