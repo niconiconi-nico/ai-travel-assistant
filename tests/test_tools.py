@@ -48,10 +48,30 @@ def test_travel_planner_returns_strict_json_for_trip_payload():
     assert first_view["name"] == "The Grand Palace"
     assert first_view["location"] == "Phra Nakhon, Bangkok"
     assert first_view["information"] == "泰国皇室地标，建筑华丽"
-    assert first_view["price"] == 500.0
+    assert first_view["price"] == 65.0
     assert first_view["open_time"] == "08:30-15:30"
     assert first_view["visit_duration"] == "3 hours"
     assert first_view["image"].startswith("http")
+
+
+def test_travel_planner_supports_chinese_city_aliases_with_catalog():
+    payload = {
+        "cities": ["北京", "上海", "吉隆坡", "槟城"],
+        "start_date": "2026-03-26",
+        "end_date": "2026-03-29",
+        "travelers": 2,
+    }
+
+    result = tools.travel_planner.invoke({"query": json.dumps(payload, ensure_ascii=False)})
+    parsed = json.loads(result)
+
+    assert parsed["views"][0]["name"] == "The Palace Museum"
+    assert parsed["views"][0]["price"] == 39.0
+    assert parsed["views"][2]["name"] == "The Bund"
+    assert parsed["views"][4]["name"] == "Petronas Twin Towers"
+    assert parsed["views"][4]["price"] == 98.0
+    assert parsed["views"][6]["name"] == "Penang Hill"
+    assert parsed["views"][6]["price"] == 30.0
 
 
 def test_travel_planner_uses_catalog_for_seoul():
@@ -71,6 +91,7 @@ def test_travel_planner_uses_catalog_for_seoul():
         "Changdeokgung Palace",
         "N Seoul Tower",
     ]
+    assert parsed["views"][0]["price"] == 10.2
     assert all("官方旅遊資訊網站" not in view["name"] for view in parsed["views"])
 
 
@@ -171,7 +192,7 @@ def test_planner_recommendations_filter_noisy_titles_and_boilerplate(monkeypatch
 
     assert [item["name"] for item in results] == ["Gyeongbokgung Palace"]
     assert results[0]["information"] == "Gyeongbokgung Palace 是 Seoul 的热门景点。"
-    assert results[0]["price"] == 3000.0
+    assert results[0]["price"] == 10.2
 
 
 def test_travel_planner_uses_recommendations_for_non_catalog_city(monkeypatch):

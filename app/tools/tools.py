@@ -261,6 +261,190 @@ TRAVEL_ATTRACTION_CATALOG = {
             "image": "https://upload.wikimedia.org/wikipedia/commons/8/8b/Changdeokgung-Injeongjeon.jpg",
         },
     ],
+    "beijing": [
+        {
+            "name": "The Palace Museum",
+            "location": "Dongcheng, Beijing",
+            "information": "故宫博物院是北京最具代表性的历史地标之一。",
+            "price": 60.00,
+            "currency": "CNY",
+            "open_time": "08:30-17:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Forbidden_City_Beijing_Shenwumen_Gate.JPG",
+        },
+        {
+            "name": "Temple of Heaven",
+            "location": "Dongcheng, Beijing",
+            "information": "天坛是北京经典皇家祭天建筑群，园区宽阔。",
+            "price": 34.00,
+            "currency": "CNY",
+            "open_time": "08:00-17:30",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/a/a4/Temple_of_Heaven_Beijing_2.JPG",
+        },
+        {
+            "name": "Summer Palace",
+            "location": "Haidian, Beijing",
+            "information": "颐和园以昆明湖和长廊闻名，适合慢游。",
+            "price": 30.00,
+            "currency": "CNY",
+            "open_time": "09:00-17:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "10:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/82/Summer_Palace_Long_Corridor.JPG",
+        },
+        {
+            "name": "Mutianyu Great Wall",
+            "location": "Huairou, Beijing",
+            "information": "慕田峪长城风景开阔，适合第一次登长城。",
+            "price": 45.00,
+            "currency": "CNY",
+            "open_time": "08:30-17:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "10:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/1/10/201905_Mutianyu_Great_Wall.jpg",
+        },
+    ],
+    "shanghai": [
+        {
+            "name": "The Bund",
+            "location": "Huangpu, Shanghai",
+            "information": "外滩是上海最经典的滨江天际线观景区。",
+            "price": 0.00,
+            "currency": "CNY",
+            "open_time": "00:00-23:59",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/a/a4/Bund_Shanghai.jpg",
+        },
+        {
+            "name": "Yu Garden",
+            "location": "Huangpu, Shanghai",
+            "information": "豫园是上海老城厢代表园林景点。",
+            "price": 40.00,
+            "currency": "CNY",
+            "open_time": "09:00-16:30",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/6/6a/Yu_Garden_Shanghai_2018.jpg",
+        },
+        {
+            "name": "Oriental Pearl Tower",
+            "location": "Pudong, Shanghai",
+            "information": "东方明珠是上海最知名的城市地标之一。",
+            "price": 199.00,
+            "currency": "CNY",
+            "open_time": "09:00-21:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "16:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/5/58/Oriental_Pearl_Tower_2019.jpg",
+        },
+        {
+            "name": "Shanghai Museum",
+            "location": "Huangpu, Shanghai",
+            "information": "上博馆藏丰富，适合安排半天文化行程。",
+            "price": 0.00,
+            "currency": "CNY",
+            "open_time": "09:00-17:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "10:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/6/69/Shanghai_Museum_2015.jpg",
+        },
+    ],
+    "kuala lumpur": [
+        {
+            "name": "Petronas Twin Towers",
+            "location": "Kuala Lumpur City Centre",
+            "information": "吉隆坡双子塔是城市天际线核心地标。",
+            "price": 98.00,
+            "currency": "MYR",
+            "open_time": "09:00-21:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/9/9f/Petronas_Twin_Towers_%28cropped%29.jpg",
+        },
+        {
+            "name": "KL Tower",
+            "location": "Bukit Nanas, Kuala Lumpur",
+            "information": "吉隆坡塔适合俯瞰市区与拍摄夜景。",
+            "price": 49.00,
+            "currency": "MYR",
+            "open_time": "09:00-22:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/0/09/Kuala_Lumpur_Tower_2014.jpg",
+        },
+        {
+            "name": "Batu Caves",
+            "location": "Gombak, Selangor",
+            "information": "黑风洞是吉隆坡周边最热门的宗教与自然景点之一。",
+            "price": 0.00,
+            "currency": "MYR",
+            "open_time": "07:00-21:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "10:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Batu_Caves_2022.jpg",
+        },
+        {
+            "name": "Central Market",
+            "location": "Kuala Lumpur",
+            "information": "中央艺术坊适合买手信和体验本地文化。",
+            "price": 0.00,
+            "currency": "MYR",
+            "open_time": "10:00-22:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "16:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/e/e0/Central_Market_Kuala_Lumpur.jpg",
+        },
+    ],
+    "penang": [
+        {
+            "name": "Penang Hill",
+            "location": "Air Itam, Penang",
+            "information": "升旗山可俯瞰槟城景观，适合半日行程。",
+            "price": 30.00,
+            "currency": "MYR",
+            "open_time": "06:15-23:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/0/05/Penang_Hill_Funicular.jpg",
+        },
+        {
+            "name": "Kek Lok Si Temple",
+            "location": "Air Itam, Penang",
+            "information": "极乐寺是槟城最著名的佛教寺庙群。",
+            "price": 0.00,
+            "currency": "MYR",
+            "open_time": "08:30-17:30",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/4/49/Kek_Lok_Si_Temple_2017.jpg",
+        },
+        {
+            "name": "Chew Jetty",
+            "location": "George Town, Penang",
+            "information": "姓周桥是槟城乔治市极具代表性的海上聚落。",
+            "price": 0.00,
+            "currency": "MYR",
+            "open_time": "00:00-23:59",
+            "suggested_duration_hours": 1,
+            "preferred_start_time": "10:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/7/71/Chew_Jetty.jpg",
+        },
+        {
+            "name": "Pinang Peranakan Mansion",
+            "location": "George Town, Penang",
+            "information": "娘惹博物馆适合了解槟城土生华人文化。",
+            "price": 25.00,
+            "currency": "MYR",
+            "open_time": "09:30-17:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "15:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/84/Pinang_Peranakan_Mansion.jpg",
+        },
+    ],
 }
 
 
@@ -277,6 +461,41 @@ FALLBACK_ATTRACTION = {
 }
 
 _PLANNER_DEFAULT_START_DATE = date(2026, 1, 1)
+_PLANNER_FIXED_MYR_RATES = {
+    "MYR": 1.0,
+    "RM": 1.0,
+    "THB": 0.13,
+    "CNY": 0.65,
+    "RMB": 0.65,
+    "JPY": 0.031,
+    "SGD": 3.50,
+    "KRW": 0.0034,
+    "USD": 4.70,
+}
+_CITY_KEY_ALIASES = {
+    "北京": "beijing",
+    "beijing": "beijing",
+    "上海": "shanghai",
+    "shanghai": "shanghai",
+    "吉隆坡": "kuala lumpur",
+    "kuala lumpur": "kuala lumpur",
+    "kuala lumpur malaysia": "kuala lumpur",
+    "槟城": "penang",
+    "檳城": "penang",
+    "penang": "penang",
+    "penang malaysia": "penang",
+    "首尔": "seoul",
+    "首爾": "seoul",
+    "seoul": "seoul",
+    "东京": "tokyo",
+    "tokyo": "tokyo",
+    "曼谷": "bangkok",
+    "bangkok": "bangkok",
+    "芭堤雅": "pattaya",
+    "pattaya": "pattaya",
+    "新加坡": "singapore",
+    "singapore": "singapore",
+}
 
 
 def _load_geopy_modules():
@@ -317,7 +536,9 @@ def _safe_parse_date(value: str) -> date | None:
 
 
 def _normalize_city_key(city: str) -> str:
-    return str(city or "").strip().lower()
+    value = str(city or "").strip().lower()
+    compact = re.sub(r"\s+", " ", value.replace(",", " ")).strip()
+    return _CITY_KEY_ALIASES.get(compact, compact)
 
 
 def _trip_dates(start_date: date, end_date: date) -> list[date]:
@@ -346,7 +567,35 @@ def _normalize_planner_price(price: float) -> float:
         return 0.0
 
 
-def _parse_numeric_ticket_price(value: str) -> float:
+def _planner_currency_code(value: str | None = None, fallback: str | None = None) -> str:
+    text = str(value or "").strip().upper()
+    token_map = {
+        "MYR": "MYR",
+        "RM": "MYR",
+        "THB": "THB",
+        "CNY": "CNY",
+        "RMB": "CNY",
+        "JPY": "JPY",
+        "SGD": "SGD",
+        "KRW": "KRW",
+        "₩": "KRW",
+        "USD": "USD",
+        "$": "USD",
+    }
+    for token, code in token_map.items():
+        if token in text:
+            return code
+    fallback_text = str(fallback or "").strip().upper()
+    return token_map.get(fallback_text, fallback_text or "MYR")
+
+
+def _convert_price_to_myr(amount: float, currency: str | None = None) -> float:
+    normalized_currency = _planner_currency_code(fallback=currency)
+    rate = _PLANNER_FIXED_MYR_RATES.get(normalized_currency, 1.0)
+    return _normalize_planner_price(float(amount) * rate)
+
+
+def _parse_numeric_ticket_price(value: str, currency: str | None = None) -> float:
     text = str(value or "").strip()
     if not text:
         return 0.0
@@ -356,7 +605,8 @@ def _parse_numeric_ticket_price(value: str) -> float:
     match = re.search(r"(\d+(?:\.\d+)?)", text.replace(",", ""))
     if not match:
         return 0.0
-    return _normalize_planner_price(match.group(1))
+    amount = float(match.group(1))
+    return _convert_price_to_myr(amount, _planner_currency_code(text, fallback=currency))
 
 
 def _planner_text_has_noise(text: str) -> bool:
@@ -457,8 +707,8 @@ def _planner_attractions_from_recommendations(city: str) -> list[dict]:
                 "name": name,
                 "location": str(item.get("location") or city).strip() or city,
                 "information": _planner_information_text(item, city, name),
-                "price": _parse_numeric_ticket_price(item.get("ticket_price")),
-                "currency": "LOCAL",
+                "price": _parse_numeric_ticket_price(item.get("ticket_price"), str(item.get("currency") or "")),
+                "currency": "MYR",
                 "open_time": open_time,
                 "suggested_duration_hours": duration_hours,
                 "preferred_start_time": preferred_start_time,
@@ -518,7 +768,7 @@ def _build_view(day: date, attraction: dict) -> dict:
         "name": attraction["name"],
         "location": attraction["location"],
         "information": attraction["information"],
-        "price": _normalize_planner_price(attraction["price"]),
+        "price": _convert_price_to_myr(attraction["price"], attraction.get("currency")),
         "open_time": attraction["open_time"],
         "arrival_time": arrival_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "departure_time": departure_time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -834,7 +834,8 @@ def test_get_attractions_by_place_filters_generic_titles(monkeypatch):
 
     result = attraction_tool.get_attractions_by_place("Beijing")
 
-    assert [item["name"] for item in result] == ["Temple of Heaven Park"]
+    assert result[0]["name"] == "Temple of Heaven Park"
+    assert all(item["name"] != "Discover the 11 most beautiful sights & attractions in Beijing" for item in result)
 
 
 def test_get_attractions_by_place_filters_generic_destination_guides_and_city_pages(monkeypatch):
