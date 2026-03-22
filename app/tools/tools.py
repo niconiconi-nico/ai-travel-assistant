@@ -4,6 +4,7 @@ import json
 import re
 from datetime import date, datetime, time, timedelta
 
+from dotenv import load_dotenv
 from langchain.tools import tool
 
 
@@ -323,14 +324,19 @@ def _planner_default_time_window(index: int) -> tuple[str, str, int]:
 
 
 def _load_attraction_recommendation_getter():
-    try:
-        from attraction_tool import get_attractions_by_place
-    except Exception:
-        return None
-    return get_attractions_by_place
+    for module_name in ("app.tools.attraction_tool", "attraction_tool"):
+        try:
+            module = import_module(module_name)
+        except Exception:
+            continue
+        getter = getattr(module, "get_attractions_by_place", None)
+        if callable(getter):
+            return getter
+    return None
 
 
 def _planner_attractions_from_recommendations(city: str) -> list[dict]:
+    load_dotenv()
     getter = _load_attraction_recommendation_getter()
     if getter is None:
         return []

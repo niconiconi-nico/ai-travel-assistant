@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 import sys
+import types
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "app" / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -98,6 +99,32 @@ def test_travel_planner_always_returns_views_for_non_json_input():
     assert list(parsed.keys()) == ["views"]
     assert len(parsed["views"]) == 1
     assert parsed["views"][0]["name"] == "Trip City City Landmark Tour"
+
+
+def test_load_attraction_recommendation_getter_supports_package_import(monkeypatch):
+    dummy_module = types.SimpleNamespace(get_attractions_by_place=lambda place, query_type=None: [])
+
+    def fake_import_module(name: str):
+        if name == "app.tools.attraction_tool":
+            return dummy_module
+        raise ImportError(name)
+
+    monkeypatch.setattr(tools, "import_module", fake_import_module)
+
+    getter = tools._load_attraction_recommendation_getter()
+
+    assert getter is dummy_module.get_attractions_by_place
+
+
+def test_planner_recommendations_load_dotenv_before_lookup(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(tools, "load_dotenv", lambda: calls.append("dotenv"))
+    monkeypatch.setattr(tools, "_load_attraction_recommendation_getter", lambda: (lambda place, query_type=None: []))
+
+    tools._planner_attractions_from_recommendations("Seoul")
+
+    assert calls == ["dotenv"]
 
 
 def test_travel_planner_uses_recommendations_for_non_catalog_city(monkeypatch):
