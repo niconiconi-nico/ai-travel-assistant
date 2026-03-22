@@ -284,6 +284,8 @@ def _clean_candidate_name(name: str) -> str:
         r"\btours?\b$|^ep\d+\b",
         r"景点玩乐|景點玩樂",
         r"washington|華盛頓",
+        r"【\s*20\d{2}.*】",
+        r"\bairplane\b|\bmilestone\b|\bmonument\b|\bmemorial\b|\bstation\b",
     ]
     lowered = text.lower()
     if any(re.search(pat, lowered, re.IGNORECASE) for pat in blocked_patterns):

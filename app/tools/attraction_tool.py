@@ -1831,10 +1831,210 @@ def _normalize_wikipedia_title(value: str) -> str:
     return text
 
 
+_OSM_ALLOWED_TOURISM_VALUES = {
+    "attraction",
+    "museum",
+    "viewpoint",
+    "theme_park",
+    "gallery",
+    "zoo",
+    "aquarium",
+    "artwork",
+}
+_OSM_ALLOWED_LEISURE_VALUES = {"park", "garden", "nature_reserve", "water_park", "theme_park"}
+_OSM_ALLOWED_HISTORIC_VALUES = {"castle", "fort", "ruins", "archaeological_site", "city_gate"}
+_OSM_BLOCKED_TAG_VALUES = {
+    ("historic", "aircraft"),
+    ("historic", "milestone"),
+    ("historic", "memorial"),
+    ("historic", "monument"),
+    ("amenity", "clock"),
+    ("amenity", "parking"),
+}
+_ARTICLE_OR_PRODUCT_PATTERNS = [
+    r"things to do",
+    r"best attractions",
+    r"top attractions",
+    r"tourist attractions",
+    r"must-see attractions",
+    r"must visit attractions",
+    r"sights\s*(?:&|and)\s*attractions",
+    r"discover the",
+    r"travel guide",
+    r"official site",
+    r"places to visit",
+    r"historical landmarks",
+    r"historical sites",
+    r"hidden gems",
+    r"itinerary",
+    r"top recommendations",
+    r"landmark tours",
+    r"tour package",
+    r"自由行",
+    r"必去",
+    r"必玩",
+    r"景點推薦",
+    r"景点推荐",
+    r"熱門旅遊景點",
+    r"热门旅游景点",
+    r"一日遊行程",
+    r"一日游行程",
+    r"親子好去處",
+    r"亲子好去处",
+    r"親子遊景點推薦",
+    r"亲子游景点推荐",
+    r"旅遊攻略",
+    r"旅游攻略",
+    r"門票",
+    r"门票",
+    r"交通.*美食",
+    r"景點美食",
+    r"景点美食",
+]
+_GENERIC_OBJECT_PATTERNS = [
+    r"^airplane$",
+    r"\bmilestone\b",
+    r"\bmonument\b",
+    r"\bmemorial\b",
+    r"\bstation\b",
+    r"\bterminal\b",
+    r"\bpier\b",
+    r"\bclock\b",
+    r"\broundabout\b",
+    r"\bstatue\b",
+]
+_ATTRACTION_NAME_HINTS = [
+    "museum", "temple", "palace", "park", "garden", "tower", "hill", "wall", "lake", "street",
+    "market", "jetty", "mosque", "church", "cathedral", "fort", "village", "zoo", "aquarium",
+    "sanctuary", "beach", "walk", "walking street", "viewpoint", "dolphinarium", "island",
+    "博物院", "博物馆", "公园", "寺", "寺庙", "故宫", "长城", "胡同", "广场", "乐园", "古城", "山", "湖", "海滩",
+]
+_WEAK_DESCRIPTION_PATTERNS = [
+    r"^an airplane is\b",
+    r"^overview\.",
+    r"full-day tour",
+    r"hotel pickup",
+    r"熱門景點",
+    r"热门景点",
+    r"含\d+個景點",
+    r"top attractions include",
+]
+
+
+def _has_attraction_name_hint(text: str) -> bool:
+    normalized = _normalize_text(text)
+    lowered = normalized.lower()
+    return any(token in lowered or token in normalized for token in _ATTRACTION_NAME_HINTS)
+
+
+def _looks_like_article_or_product_text(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    if not normalized:
+        return False
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _ARTICLE_OR_PRODUCT_PATTERNS):
+        return True
+    if re.search(r"【\s*20\d{2}.*】", normalized):
+        return True
+    if re.search(r"\b(?:youtube|reddit|facebook|instagram)\b", normalized):
+        return True
+    return bool(re.search(r"\btours?\b", normalized))
+
+
+def _looks_like_generic_object_name(name: str) -> bool:
+    normalized = _normalize_text(name).strip().lower()
+    if not normalized:
+        return True
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _GENERIC_OBJECT_PATTERNS)
+
+
+def _has_city_iconic_match(name: str, city: str) -> bool:
+    normalized_name = _normalize_match_text(name)
+    normalized_city = _normalize_text(city).lower()
+    for city_key, iconic_terms in _CITY_ICONIC_ATTRACTIONS.items():
+        if city_key in normalized_city and any(term in normalized_name for term in iconic_terms):
+            return True
+    return False
+
+
+def _description_is_usable_for_recommendation(text: str) -> bool:
+    value = _normalize_text(text)
+    if _has_placeholder_description(value):
+        return False
+    lowered = value.lower()
+    return not any(re.search(pattern, lowered, re.IGNORECASE) for pattern in _WEAK_DESCRIPTION_PATTERNS)
+
+
+def _infer_recommendation_source_bucket(candidate: dict[str, Any]) -> str:
+    source_type = _normalize_text(candidate.get("source_type")).lower()
+    link = ""
+    sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+    if sources:
+        link = _normalize_text(sources[0])
+    title = _normalize_text(candidate.get("source_title") or candidate.get("name"))
+    snippet = _normalize_text(candidate.get("source_snippet") or candidate.get("description"))
+    haystack = f"{link} {title} {snippet}".lower()
+    platform = _classify_platform(link, title)
+
+    if source_type in {"osm", "osm_poi"}:
+        return "osm_poi"
+    if source_type in {"wikipedia"} or platform == "wikipedia":
+        return "wiki_entity"
+    if source_type == "search_entity":
+        return "search_entity"
+    if platform == "official":
+        return "official_attraction_page" if _has_attraction_name_hint(title) else "official_destination_page"
+    if platform in {"trip", "klook", "kkday", "ctrip"}:
+        return "ota_product_page" if _looks_like_article_or_product_text(haystack) else "ota_destination_page"
+    if any(token in haystack for token in ["youtube", "youtu.be", "episode", "ep5", "ep6"]):
+        return "video_page"
+    if any(token in haystack for token in ["reddit", "forum", "quora"]):
+        return "ugc_discussion"
+    if _looks_like_article_or_product_text(haystack) or platform in {"travel_guide", "tripadvisor"}:
+        return "travel_blog_article"
+    if source_type == "offline_catalog":
+        return "offline_seed"
+    if source_type == "serpapi":
+        return "search_entity"
+    return source_type or "other"
+
+
+def _is_supported_osm_candidate(tags: dict[str, Any], name: str) -> bool:
+    tourism = _normalize_text(tags.get("tourism")).lower()
+    leisure = _normalize_text(tags.get("leisure")).lower()
+    historic = _normalize_text(tags.get("historic")).lower()
+    amenity = _normalize_text(tags.get("amenity")).lower()
+    railway = _normalize_text(tags.get("railway")).lower()
+    man_made = _normalize_text(tags.get("man_made")).lower()
+
+    if any((key, value) in _OSM_BLOCKED_TAG_VALUES for key, value in [("historic", historic), ("amenity", amenity)]):
+        return False
+    if railway or man_made in {"tower", "mast", "water_tower"}:
+        return False
+    if _looks_like_generic_object_name(name):
+        return False
+
+    allowed = (
+        tourism in _OSM_ALLOWED_TOURISM_VALUES
+        or leisure in _OSM_ALLOWED_LEISURE_VALUES
+        or historic in _OSM_ALLOWED_HISTORIC_VALUES
+    )
+    if not allowed:
+        return False
+
+    evidence = any(
+        _normalize_text(tags.get(field))
+        for field in ["description", "short_description", "image", "wikimedia_commons", "wikipedia", "wikidata", "website", "url"]
+    )
+    strong_type = tourism in {"attraction", "museum", "theme_park", "zoo", "aquarium"} or historic in {"castle", "fort"}
+    return strong_type or evidence or _has_attraction_name_hint(name)
+
+
 def _extract_poi_from_element(element: dict[str, Any]) -> dict[str, Any]:
     tags = element.get("tags") if isinstance(element.get("tags"), dict) else {}
     name = _normalize_text(tags.get("name"))
     if not _is_valid_entity_name(name):
+        return {}
+    if not _is_supported_osm_candidate(tags, name):
         return {}
 
     poi: dict[str, Any] = {
@@ -1882,8 +2082,15 @@ def _get_osm_city_pois(place: str, limit: int = 12) -> list[dict[str, Any]]:
       nwr(around:{radius},{lat},{lon})[tourism=attraction];
       nwr(around:{radius},{lat},{lon})[tourism=museum];
       nwr(around:{radius},{lat},{lon})[tourism=viewpoint];
-      nwr(around:{radius},{lat},{lon})[historic];
+      nwr(around:{radius},{lat},{lon})[tourism=theme_park];
+      nwr(around:{radius},{lat},{lon})[tourism=gallery];
+      nwr(around:{radius},{lat},{lon})[tourism=zoo];
+      nwr(around:{radius},{lat},{lon})[tourism=aquarium];
+      nwr(around:{radius},{lat},{lon})[historic=castle];
+      nwr(around:{radius},{lat},{lon})[historic=fort];
+      nwr(around:{radius},{lat},{lon})[historic=ruins];
       nwr(around:{radius},{lat},{lon})[leisure=park];
+      nwr(around:{radius},{lat},{lon})[leisure=garden];
     );
     out tags center 120;
     """
@@ -1992,50 +2199,9 @@ def _is_plausible_attraction_name(name: str) -> bool:
         return False
 
     lowered = text.lower()
-    bad_tokens = [
-        "things to do",
-        "best attractions",
-        "top attractions",
-        "tourist attractions",
-        "must-see attractions",
-        "must visit attractions",
-        "sights & attractions",
-        "sights and attractions",
-        "discover the",
-        "travel guide",
-        "official site",
-        "wikipedia",
-        "tripadvisor",
-        "places to visit",
-        "historical landmarks",
-        "historical sites",
-        "travel guide",
-        "旅游指南",
-        "旅遊指南",
-        "hidden gems",
-        "itinerary",
-        "is there much to do",
-        "top recommendations",
-        "landmark tours",
-        "tour package",
-        "自由行",
-        "必去",
-        "必玩",
-        "景點推薦",
-        "景点推荐",
-        "熱門旅遊景點",
-        "热门旅游景点",
-        "一日遊行程",
-        "一日游行程",
-        "親子好去處",
-        "亲子好去处",
-        "親子遊景點推薦",
-        "亲子游景点推荐",
-        "攻略",
-        "门票",
-        "票价",
-    ]
-    if any(token in lowered for token in bad_tokens):
+    if _looks_like_article_or_product_text(text):
+        return False
+    if _looks_like_generic_object_name(text):
         return False
 
     generic_patterns = [
@@ -2070,12 +2236,7 @@ def _is_plausible_attraction_name(name: str) -> bool:
     if re.fullmatch(r"[A-Za-z]{1,4}\d*[-–:]?", text):
         return False
 
-    meaningful_tokens = [
-        "museum", "temple", "palace", "park", "garden", "tower", "hill", "wall", "lake", "street",
-        "market", "jetty", "mosque", "church", "cathedral", "fort", "village", "zoo", "aquarium",
-        "博物院", "博物馆", "公园", "寺", "寺庙", "故宫", "长城", "胡同", "广场", "乐园", "古城", "山", "湖",
-    ]
-    if not any(token in lowered or token in text for token in meaningful_tokens) and len(text.split()) > 8:
+    if not _has_attraction_name_hint(text) and len(text.split()) > 8:
         return False
 
     return True
@@ -2123,36 +2284,49 @@ def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
         return True
     if normalized_city and normalized_name == normalized_city:
         return True
-    if any(
-        token in normalized_name
-        for token in [
-            "places to visit",
-            "historical landmarks",
-            "historical sites",
-            "travel guide",
-            "旅游指南",
-            "旅遊指南",
-            "is there much to do",
-            "top recommendations",
-            "things to do",
-            "自由行",
-            "景點推薦",
-            "景点推荐",
-            "熱門旅遊景點",
-            "热门旅游景点",
-            "一日遊行程",
-            "一日游行程",
-            "親子好去處",
-            "亲子好去处",
-            "landmark tours",
-            "門票",
-            "门票",
-        ]
-    ):
+    if _looks_like_article_or_product_text(normalized_name):
         return True
-    if re.search(r"\btours?\b", normalized_name):
+    if _looks_like_generic_object_name(normalized_name):
+        return True
+    if normalized_city and normalized_city in normalized_name and not _has_attraction_name_hint(normalized_name):
         return True
     return False
+
+
+def _is_valid_recommendation_entity(candidate: dict[str, Any], city: str) -> bool:
+    name = _normalize_text(candidate.get("name"))
+    if not _is_plausible_attraction_name(name):
+        return False
+    if _looks_like_generic_destination_candidate(name, city):
+        return False
+
+    description = _normalize_text(candidate.get("description") or candidate.get("source_snippet"))
+    source_title = _normalize_text(candidate.get("source_title"))
+    source_bucket = _infer_recommendation_source_bucket(candidate)
+    if source_bucket == "osm_poi":
+        return True
+    if source_bucket in {"official_destination_page", "ota_product_page", "ota_destination_page", "travel_blog_article", "ugc_discussion", "video_page"}:
+        return False
+
+    if _looks_like_article_or_product_text(source_title) and not _has_city_iconic_match(name, city):
+        return False
+    if _looks_like_generic_object_name(name):
+        return False
+
+    sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+    has_authority = any(
+        token
+        for token in [
+            _normalize_text(candidate.get("wikipedia")),
+            _normalize_text(candidate.get("wikidata")),
+            _normalize_text(candidate.get("website")),
+        ]
+    ) or any(
+        _classify_platform(_normalize_text(source), source_title) in {"official", "wikipedia"}
+        for source in sources
+    )
+    has_evidence = has_authority or _description_is_usable_for_recommendation(description) or _has_attraction_name_hint(name) or _has_city_iconic_match(name, city)
+    return has_evidence
 
 
 def _has_placeholder_description(text: str) -> bool:
@@ -2184,32 +2358,41 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
     image = _normalize_text(candidate.get("image"))
     sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
     source_count = len([s for s in sources if _normalize_text(s)])
-    source_type = _normalize_text(candidate.get("source_type")).lower()
+    source_bucket = _infer_recommendation_source_bucket(candidate)
 
     score = 0
-    if not _has_placeholder_description(desc):
-        score += 4
+    if _has_city_iconic_match(name, city):
+        score += 40
+    if _description_is_usable_for_recommendation(desc):
+        score += 8
     if image.startswith("http"):
-        score += 2
+        score += 5
     if ticket and _is_valid_ticket_price_output(ticket):
-        score += 2
-    score += min(3, source_count)
-    if city.lower() in name.lower():
-        score += 1
-    if any(token in name.lower() for token in ["museum", "temple", "hill", "fort", "heritage", "park", "tower"]):
-        score += 1
-    if source_type == "serpapi":
         score += 3
-    if sources:
-        top_platform = _classify_platform(_normalize_text(sources[0]), name)
-        if top_platform in {"official", "tripadvisor", "trip", "travel_guide"}:
-            score += 2
-    for city_key, iconic_terms in _CITY_ICONIC_ATTRACTIONS.items():
-        if city_key in city.lower():
-            normalized_name = _normalize_match_text(name)
-            if any(term in normalized_name for term in iconic_terms):
-                score += 5
-            break
+    score += min(4, source_count)
+    if city.lower() in name.lower():
+        score += 2
+    if _has_attraction_name_hint(name):
+        score += 10
+
+    source_bucket_scores = {
+        "official_attraction_page": 25,
+        "wiki_entity": 20,
+        "osm_poi": 15,
+        "offline_seed": 15,
+        "search_entity": 22,
+        "official_destination_page": -40,
+        "ota_product_page": -25,
+        "ota_destination_page": -25,
+        "travel_blog_article": -35,
+        "ugc_discussion": -35,
+        "video_page": -35,
+    }
+    score += source_bucket_scores.get(source_bucket, 0)
+    if _looks_like_generic_object_name(name):
+        score -= 60
+    if not _description_is_usable_for_recommendation(desc) and not _has_city_iconic_match(name, city):
+        score -= 20
     return score
 
 
@@ -2350,15 +2533,20 @@ def _extract_search_candidates_with_gemini(
         if not _candidate_name_grounded_in_source(name, title, snippet):
             continue
         link = _normalize_text(source_item.get("link")) if isinstance(source_item, dict) else ""
+        candidate = {
+            "name": name,
+            "description": "" if _has_placeholder_description(_normalize_text(item.get("description"))) else _normalize_text(item.get("description")),
+            "image": "",
+            "ticket_price": "",
+            "sources": [link] if link else [],
+            "source_type": "search_entity",
+            "source_title": title,
+            "source_snippet": snippet,
+        }
+        if not _is_valid_recommendation_entity(candidate, place):
+            continue
         extracted.append(
-            {
-                "name": name,
-                "description": "" if _has_placeholder_description(_normalize_text(item.get("description"))) else _normalize_text(item.get("description")),
-                "image": "",
-                "ticket_price": "",
-                "sources": [link] if link else [],
-                "source_type": "serpapi",
-            }
+            candidate
         )
     return extracted
 
@@ -2480,7 +2668,7 @@ def _collect_search_recommendation_candidates(
         gemini_candidates = _extract_search_candidates_with_gemini(place=place, query=query, organic_results=organic_results)
         for candidate in gemini_candidates:
             name_key = _normalize_text(candidate.get("name")).lower()
-            if not name_key or name_key in seen_names or _looks_like_generic_destination_candidate(candidate.get("name", ""), place):
+            if not name_key or name_key in seen_names or not _is_valid_recommendation_entity(candidate, place):
                 continue
             seen_names.add(name_key)
             candidate["score"] = _recommendation_quality_score(candidate, place)
@@ -2510,7 +2698,11 @@ def _collect_search_recommendation_candidates(
                 "ticket_price": "",
                 "sources": [link] if link else [],
                 "source_type": "serpapi",
+                "source_title": title,
+                "source_snippet": snippet,
             }
+            if not _is_valid_recommendation_entity(candidate, place):
+                continue
             candidate["score"] = _recommendation_quality_score(candidate, place)
             candidates.append(candidate)
             if len(candidates) >= limit:
@@ -2692,7 +2884,12 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
             "ticket_price": _normalize_text(enriched.get("ticket_price")),
             "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
             "source_type": "osm",
+            "wikipedia": _normalize_text(enriched.get("wikipedia")),
+            "wikidata": _normalize_text(enriched.get("wikidata")),
+            "website": _normalize_text(enriched.get("website")),
         }
+        if not _is_valid_recommendation_entity(candidate, place):
+            continue
         candidate["score"] = _recommendation_quality_score(candidate, place)
         candidates.append(candidate)
         if len(candidates) >= 14:
@@ -2719,8 +2916,7 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
     candidates = [
         c
         for c in candidates
-        if _is_plausible_attraction_name(_normalize_text(c.get("name")))
-        and not _looks_like_generic_destination_candidate(_normalize_text(c.get("name")), place)
+        if _is_valid_recommendation_entity(c, place)
     ]
     candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
     normalized = normalize_recommendations_with_gemini(user_query=query_hint or place, city=place, candidates=candidates[:14])
@@ -2728,9 +2924,15 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
         normalized = candidates[:12]
 
     final_items: list[dict[str, str]] = []
+    base_candidates_by_name = {
+        _normalize_text(candidate.get("name")).lower(): candidate
+        for candidate in candidates
+        if _normalize_text(candidate.get("name"))
+    }
     for item in normalized[:12]:
         name = _normalize_text(item.get("name"))
-        if not _is_plausible_attraction_name(name) or _looks_like_generic_destination_candidate(name, place):
+        base_item = base_candidates_by_name.get(name.lower(), item)
+        if not _is_valid_recommendation_entity(base_item, place):
             continue
         desc = _normalize_text(item.get("description"))
         if _has_placeholder_description(desc):

@@ -1088,9 +1088,57 @@ def test_extract_search_candidates_with_gemini_rejects_ungrounded_name_and_clean
             "image": "",
             "ticket_price": "",
             "sources": ["https://example.com/pattaya-list"],
-            "source_type": "serpapi",
+            "source_type": "search_entity",
+            "source_title": "Best Places To Visit in Pattaya",
+            "source_snippet": "Top attractions in Pattaya include The Sanctuary of Truth and Pattaya Floating Market.",
         }
     ]
+
+
+def test_extract_poi_from_element_rejects_generic_osm_object_without_attraction_signal():
+    result = attraction_tool._extract_poi_from_element(
+        {
+            "type": "node",
+            "id": 123,
+            "tags": {
+                "name": "Airplane",
+                "historic": "aircraft",
+            },
+        }
+    )
+
+    assert result == {}
+
+
+def test_is_valid_recommendation_entity_rejects_article_and_product_candidates():
+    article_candidate = {
+        "name": "North Pattaya 427 must-visit attractions",
+        "description": "City guide roundup.",
+        "sources": ["https://example.com/pattaya-guide"],
+        "source_type": "serpapi",
+        "source_title": "North Pattaya 427 must-visit attractions",
+        "source_snippet": "Guide to food, transport and tours.",
+    }
+    product_candidate = {
+        "name": "Pattaya Landmark Tours",
+        "description": "Explore Pattaya on a full-day tour.",
+        "sources": ["https://example.com/pattaya-tours"],
+        "source_type": "serpapi",
+        "source_title": "Pattaya Landmark Tours",
+        "source_snippet": "Hotel pickup included.",
+    }
+    valid_candidate = {
+        "name": "The Sanctuary of Truth",
+        "description": "All-wood sanctuary and museum in Pattaya.",
+        "sources": ["https://example.com/sanctuary"],
+        "source_type": "search_entity",
+        "source_title": "The Sanctuary of Truth",
+        "source_snippet": "All-wood sanctuary in Pattaya.",
+    }
+
+    assert attraction_tool._is_valid_recommendation_entity(article_candidate, "Pattaya") is False
+    assert attraction_tool._is_valid_recommendation_entity(product_candidate, "Pattaya") is False
+    assert attraction_tool._is_valid_recommendation_entity(valid_candidate, "Pattaya") is True
 
 
 def test_get_attractions_by_place_canonicalizes_chinese_city_name(monkeypatch):
