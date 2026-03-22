@@ -74,6 +74,12 @@ def test_travel_planner_supports_chinese_city_aliases_with_catalog():
     assert parsed["views"][6]["price"] == 30.0
 
 
+def test_travel_catalog_contains_at_least_thirty_cities():
+    assert len(tools.TRAVEL_ATTRACTION_CATALOG) >= 30
+    for city in ["Paris", "London", "Rome", "Barcelona", "New York", "Vancouver"]:
+        assert tools._normalize_city_key(city) in tools.TRAVEL_ATTRACTION_CATALOG
+
+
 def test_travel_planner_uses_catalog_for_seoul():
     payload = {
         "cities": ["Seoul"],
