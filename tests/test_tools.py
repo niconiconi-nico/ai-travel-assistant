@@ -47,7 +47,7 @@ def test_travel_planner_returns_strict_json_for_trip_payload():
     assert first_view["name"] == "The Grand Palace"
     assert first_view["location"] == "Phra Nakhon, Bangkok"
     assert first_view["information"] == "泰国皇室地标，建筑华丽"
-    assert first_view["price"] == 65.0
+    assert first_view["price"] == 500.0
     assert first_view["open_time"] == "08:30-15:30"
     assert first_view["visit_duration"] == "3 hours"
     assert first_view["image"].startswith("http")
@@ -78,9 +78,23 @@ def test_travel_planner_times_stay_within_trip_dates_and_open_hours():
         assert (departure.hour, departure.minute) <= (end_hour, end_minute)
 
 
-def test_travel_planner_returns_empty_views_for_invalid_payload():
+def test_travel_planner_returns_fallback_views_for_invalid_payload():
     payload = {"cities": [], "start_date": "bad", "end_date": "2026-03-29"}
 
     result = tools.travel_planner.invoke({"query": json.dumps(payload)})
+    parsed = json.loads(result)
 
-    assert json.loads(result) == {"views": []}
+    assert list(parsed.keys()) == ["views"]
+    assert len(parsed["views"]) == 1
+    assert parsed["views"][0]["name"] == "Trip City City Landmark Tour"
+    assert parsed["views"][0]["arrival_time"].startswith("2026-01-01T")
+    assert parsed["views"][0]["price"] == 300.0
+
+
+def test_travel_planner_always_returns_views_for_non_json_input():
+    result = tools.travel_planner.invoke({"query": "make me a plan"})
+    parsed = json.loads(result)
+
+    assert list(parsed.keys()) == ["views"]
+    assert len(parsed["views"]) == 1
+    assert parsed["views"][0]["name"] == "Trip City City Landmark Tour"

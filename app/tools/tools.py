@@ -1,12 +1,9 @@
 from importlib import import_module
 from importlib.util import find_spec
 import json
-import os
 from datetime import date, datetime, time, timedelta
 
 from langchain.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
 
 
 TRAVEL_ATTRACTION_CATALOG = {
@@ -231,11 +228,7 @@ FALLBACK_ATTRACTION = {
     "image": "https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg",
 }
 
-_PLANNER_EXCHANGE_RATES = {
-    "MYR": 1.0,
-    "RM": 1.0,
-    "THB": 0.13,
-}
+_PLANNER_DEFAULT_START_DATE = date(2026, 1, 1)
 
 
 def _load_geopy_modules():
@@ -298,9 +291,36 @@ def _format_duration(hours: int) -> str:
     return f"{hours} hour" if hours == 1 else f"{hours} hours"
 
 
-def _convert_planner_price_to_myr(price: float, currency: str) -> float:
-    rate = _PLANNER_EXCHANGE_RATES.get(str(currency or "").upper(), 1.0)
-    return float(f"{float(price) * rate:.2f}")
+def _normalize_planner_price(price: float) -> float:
+    try:
+        return float(f"{float(price):.2f}")
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_trip_payload(query: str | dict) -> tuple[list[str], date, date, int]:
+    payload = _parse_json_query(query)
+    cities = [str(city).strip() for city in payload.get("cities", []) if str(city).strip()]
+    if not cities:
+        cities = ["Trip City"]
+
+    parsed_start_date = _safe_parse_date(payload.get("start_date"))
+    parsed_end_date = _safe_parse_date(payload.get("end_date"))
+    start_date = parsed_start_date or _PLANNER_DEFAULT_START_DATE
+    end_date = parsed_end_date or start_date
+    if parsed_start_date is None or parsed_end_date is None:
+        end_date = start_date
+    if end_date < start_date:
+        end_date = start_date
+
+    travelers_raw = payload.get("travelers", 1)
+    try:
+        travelers = int(travelers_raw)
+    except (TypeError, ValueError):
+        travelers = 1
+    travelers = max(1, travelers)
+
+    return cities, start_date, end_date, travelers
 
 
 def _build_view(day: date, attraction: dict) -> dict:
@@ -324,13 +344,11 @@ def _build_view(day: date, attraction: dict) -> dict:
             departure_time = min(arrival_time + timedelta(hours=duration_hours), open_end_time)
 
     duration_hours = max(1, int((departure_time - arrival_time).total_seconds() // 3600) or duration_hours)
-    converted_price = _convert_planner_price_to_myr(attraction["price"], attraction.get("currency", "MYR"))
-
     return {
         "name": attraction["name"],
         "location": attraction["location"],
         "information": attraction["information"],
-        "price": converted_price,
+        "price": _normalize_planner_price(attraction["price"]),
         "open_time": attraction["open_time"],
         "arrival_time": arrival_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "departure_time": departure_time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -351,14 +369,7 @@ def _attractions_for_city(city: str) -> list[dict]:
 
 
 def _build_structured_travel_plan(query: str) -> dict:
-    payload = _parse_json_query(query)
-    cities = [str(city).strip() for city in payload.get("cities", []) if str(city).strip()]
-    start_date = _safe_parse_date(payload.get("start_date"))
-    end_date = _safe_parse_date(payload.get("end_date"))
-
-    if not cities or not start_date or not end_date or end_date < start_date:
-        return {"views": []}
-
+    cities, start_date, end_date, _travelers = _normalize_trip_payload(query)
     trip_days = _trip_dates(start_date, end_date)
     if not trip_days:
         return {"views": []}
@@ -449,36 +460,4 @@ def travel_planner(query: str) -> str:
     - 输入：包含 cities/start_date/end_date/travelers 的 JSON 字符串
     - 输出：{"views":[...]} JSON 字符串
     """
-    payload = _parse_json_query(query)
-    if {"cities", "start_date", "end_date"}.issubset(payload.keys()):
-        return json.dumps(_build_structured_travel_plan(payload), ensure_ascii=False)
-
-    provider = os.getenv("LLM_PROVIDER", "").lower()
-    if provider == "google" or os.getenv("GOOGLE_API_KEY"):
-        llm = ChatGoogleGenerativeAI(
-            model=os.getenv("GOOGLE_LLM_MODEL", "gemini-1.5-flash"),
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            temperature=0.2,
-        )
-    else:
-        llm = ChatOpenAI(
-            model=os.getenv("COMPANY_LLM_MODEL", "gpt-4o-mini"),
-            base_url=os.getenv("COMPANY_BASE_URL"),
-            api_key=os.getenv("COMPANY_API_KEY"),
-            temperature=0.2,
-        )
-
-    prompt = f"""
-你是一位专业旅行规划师，请根据以下用户需求生成一个简洁易读的旅行方案：
-用户需求：{query}
-
-请严格按照以下中文结构输出：
-1）行程规划
-2）每天安排（按 Day 1/2/3... 列出：上午/下午/晚上）
-3）简要预算建议（交通/住宿/餐饮/门票/购物）
-
-要求：
-- 结合用户偏好（美食/动漫/文化等）
-- 预算给出区间或均值建议，并说明简单理由
-"""
-    return llm.invoke(prompt).content
+    return json.dumps(_build_structured_travel_plan(query), ensure_ascii=False)
