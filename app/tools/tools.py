@@ -215,6 +215,52 @@ TRAVEL_ATTRACTION_CATALOG = {
             "image": "https://upload.wikimedia.org/wikipedia/commons/1/13/Singapore_Botanic_Gardens_ECO_lake.jpg",
         },
     ],
+    "seoul": [
+        {
+            "name": "Gyeongbokgung Palace",
+            "location": "Jongno-gu, Seoul",
+            "information": "朝鲜王朝代表性宫殿，适合首次到首尔的游客。",
+            "price": 3000.00,
+            "currency": "KRW",
+            "open_time": "09:00-18:00",
+            "suggested_duration_hours": 3,
+            "preferred_start_time": "09:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/e/e7/Gyeongbokgung-Geunjeongjeon.jpg",
+        },
+        {
+            "name": "Bukchon Hanok Village",
+            "location": "Jongno-gu, Seoul",
+            "information": "传统韩屋街区，适合散步拍照并体验首尔旧城风貌。",
+            "price": 0.00,
+            "currency": "KRW",
+            "open_time": "10:00-17:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "13:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/5/59/Korea-Seoul-Bukchon-Hanok-Maeul-01.jpg",
+        },
+        {
+            "name": "N Seoul Tower",
+            "location": "Yongsan-gu, Seoul",
+            "information": "首尔经典观景地标，适合傍晚登塔看城市夜景。",
+            "price": 21000.00,
+            "currency": "KRW",
+            "open_time": "10:00-23:00",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "18:00",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/3/3d/N_Seoul_Tower_at_night.JPG",
+        },
+        {
+            "name": "Changdeokgung Palace",
+            "location": "Jongno-gu, Seoul",
+            "information": "世界遗产宫殿，后苑景观尤其受欢迎。",
+            "price": 3000.00,
+            "currency": "KRW",
+            "open_time": "09:00-17:30",
+            "suggested_duration_hours": 2,
+            "preferred_start_time": "10:30",
+            "image": "https://upload.wikimedia.org/wikipedia/commons/8/8b/Changdeokgung-Injeongjeon.jpg",
+        },
+    ],
 }
 
 
@@ -313,6 +359,50 @@ def _parse_numeric_ticket_price(value: str) -> float:
     return _normalize_planner_price(match.group(1))
 
 
+def _planner_text_has_noise(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    noise_patterns = [
+        r"&#x[0-9a-f]+;",
+        r"cookie",
+        r"跳過導航|跳到課文|快捷鍵",
+        r"官方旅遊資訊網站|official tourism website|visit seoul",
+        r"close\s+-->|-->\s*-->",
+        r"menu",
+        r"browse.*record|browsing.*record",
+    ]
+    return any(re.search(pattern, lowered, re.IGNORECASE) for pattern in noise_patterns)
+
+
+def _planner_name_is_usable(name: str, city: str) -> bool:
+    value = str(name or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    city_text = str(city or "").strip().lower()
+    if len(value) > 80:
+        return False
+    if _planner_text_has_noise(value):
+        return False
+    if "|" in value or "｜" in value:
+        return False
+    if re.search(r"景點|景点|熱門景點|热门景点|official tourism website|旅遊資訊網站|旅游资讯网站", value, re.IGNORECASE):
+        return False
+    if re.search(r"top\s*\d+|best\s+\d+|自由行|行程|攻略", value, re.IGNORECASE):
+        return False
+    if city_text and lowered == city_text:
+        return False
+    return True
+
+
+def _planner_information_text(item: dict, city: str, name: str) -> str:
+    raw = str(item.get("brief_description") or item.get("description") or "").strip()
+    if not raw or _planner_text_has_noise(raw):
+        return f"{name} 是 {city} 的热门景点。".strip()
+    return raw[:240].strip()
+
+
 def _planner_default_time_window(index: int) -> tuple[str, str, int]:
     slots = [
         ("09:00", "09:00-18:00", 3),
@@ -354,7 +444,7 @@ def _planner_attractions_from_recommendations(city: str) -> list[dict]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name", "")).strip()
-        if not name:
+        if not _planner_name_is_usable(name, city):
             continue
         lowered_name = name.lower()
         if lowered_name in seen_names:
@@ -366,7 +456,7 @@ def _planner_attractions_from_recommendations(city: str) -> list[dict]:
             {
                 "name": name,
                 "location": str(item.get("location") or city).strip() or city,
-                "information": str(item.get("brief_description") or item.get("description") or f"{city} 热门景点。").strip(),
+                "information": _planner_information_text(item, city, name),
                 "price": _parse_numeric_ticket_price(item.get("ticket_price")),
                 "currency": "LOCAL",
                 "open_time": open_time,

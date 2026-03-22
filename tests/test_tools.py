@@ -54,6 +54,26 @@ def test_travel_planner_returns_strict_json_for_trip_payload():
     assert first_view["image"].startswith("http")
 
 
+def test_travel_planner_uses_catalog_for_seoul():
+    payload = {
+        "cities": ["Seoul"],
+        "start_date": "2026-03-26",
+        "end_date": "2026-03-27",
+        "travelers": 2,
+    }
+
+    result = tools.travel_planner.invoke({"query": json.dumps(payload)})
+    parsed = json.loads(result)
+
+    assert [view["name"] for view in parsed["views"]] == [
+        "Gyeongbokgung Palace",
+        "Bukchon Hanok Village",
+        "Changdeokgung Palace",
+        "N Seoul Tower",
+    ]
+    assert all("官方旅遊資訊網站" not in view["name"] for view in parsed["views"])
+
+
 def test_travel_planner_times_stay_within_trip_dates_and_open_hours():
     payload = {
         "cities": ["Bangkok", "Pattaya"],
@@ -127,38 +147,65 @@ def test_planner_recommendations_load_dotenv_before_lookup(monkeypatch):
     assert calls == ["dotenv"]
 
 
+def test_planner_recommendations_filter_noisy_titles_and_boilerplate(monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "_load_attraction_recommendation_getter",
+        lambda: (
+            lambda place, query_type=None: [
+                {
+                    "name": "景點| 首爾市官方旅遊資訊網站",
+                    "brief_description": "景點 | 首爾市官方旅遊資訊網站 跳過導航 Cookie close --> -->",
+                    "ticket_price": "",
+                },
+                {
+                    "name": "Gyeongbokgung Palace",
+                    "brief_description": "Visit Seoul cookie banner --> -->",
+                    "ticket_price": "KRW 3000",
+                },
+            ]
+        ),
+    )
+
+    results = tools._planner_attractions_from_recommendations("Seoul")
+
+    assert [item["name"] for item in results] == ["Gyeongbokgung Palace"]
+    assert results[0]["information"] == "Gyeongbokgung Palace 是 Seoul 的热门景点。"
+    assert results[0]["price"] == 3000.0
+
+
 def test_travel_planner_uses_recommendations_for_non_catalog_city(monkeypatch):
     monkeypatch.setattr(
         tools,
         "_planner_attractions_from_recommendations",
         lambda city: [
             {
-                "name": "Gyeongbokgung Palace",
-                "location": "Jongno-gu, Seoul",
-                "information": "首尔经典王宫景点。",
-                "price": 3000.0,
+                "name": "Gamcheon Culture Village",
+                "location": "Saha-gu, Busan",
+                "information": "釜山彩色山城聚落，适合步行拍照。",
+                "price": 0.0,
                 "currency": "KRW",
                 "open_time": "09:00-18:00",
                 "suggested_duration_hours": 3,
                 "preferred_start_time": "09:00",
-                "image": "https://example.com/gyeongbokgung.jpg",
+                "image": "https://example.com/gamcheon.jpg",
             },
             {
-                "name": "N Seoul Tower",
-                "location": "Yongsan-gu, Seoul",
-                "information": "俯瞰首尔夜景的人气地标。",
-                "price": 21000.0,
+                "name": "Haedong Yonggungsa",
+                "location": "Gijang-gun, Busan",
+                "information": "海边寺庙景观独特。",
+                "price": 0.0,
                 "currency": "KRW",
                 "open_time": "10:00-23:00",
                 "suggested_duration_hours": 2,
                 "preferred_start_time": "18:00",
-                "image": "https://example.com/nseoul.jpg",
+                "image": "https://example.com/yonggungsa.jpg",
             },
         ],
     )
 
     payload = {
-        "cities": ["Seoul"],
+        "cities": ["Busan"],
         "start_date": "2026-03-26",
         "end_date": "2026-03-26",
         "travelers": 2,
@@ -167,5 +214,5 @@ def test_travel_planner_uses_recommendations_for_non_catalog_city(monkeypatch):
     result = tools.travel_planner.invoke({"query": json.dumps(payload)})
     parsed = json.loads(result)
 
-    assert [view["name"] for view in parsed["views"]] == ["Gyeongbokgung Palace", "N Seoul Tower"]
+    assert [view["name"] for view in parsed["views"]] == ["Gamcheon Culture Village", "Haedong Yonggungsa"]
     assert all("City Landmark Tour" not in view["name"] for view in parsed["views"])
