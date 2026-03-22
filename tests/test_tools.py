@@ -98,3 +98,47 @@ def test_travel_planner_always_returns_views_for_non_json_input():
     assert list(parsed.keys()) == ["views"]
     assert len(parsed["views"]) == 1
     assert parsed["views"][0]["name"] == "Trip City City Landmark Tour"
+
+
+def test_travel_planner_uses_recommendations_for_non_catalog_city(monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "_planner_attractions_from_recommendations",
+        lambda city: [
+            {
+                "name": "Gyeongbokgung Palace",
+                "location": "Jongno-gu, Seoul",
+                "information": "首尔经典王宫景点。",
+                "price": 3000.0,
+                "currency": "KRW",
+                "open_time": "09:00-18:00",
+                "suggested_duration_hours": 3,
+                "preferred_start_time": "09:00",
+                "image": "https://example.com/gyeongbokgung.jpg",
+            },
+            {
+                "name": "N Seoul Tower",
+                "location": "Yongsan-gu, Seoul",
+                "information": "俯瞰首尔夜景的人气地标。",
+                "price": 21000.0,
+                "currency": "KRW",
+                "open_time": "10:00-23:00",
+                "suggested_duration_hours": 2,
+                "preferred_start_time": "18:00",
+                "image": "https://example.com/nseoul.jpg",
+            },
+        ],
+    )
+
+    payload = {
+        "cities": ["Seoul"],
+        "start_date": "2026-03-26",
+        "end_date": "2026-03-26",
+        "travelers": 2,
+    }
+
+    result = tools.travel_planner.invoke({"query": json.dumps(payload)})
+    parsed = json.loads(result)
+
+    assert [view["name"] for view in parsed["views"]] == ["Gyeongbokgung Palace", "N Seoul Tower"]
+    assert all("City Landmark Tour" not in view["name"] for view in parsed["views"])

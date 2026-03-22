@@ -1,6 +1,7 @@
 from importlib import import_module
 from importlib.util import find_spec
 import json
+import re
 from datetime import date, datetime, time, timedelta
 
 from langchain.tools import tool
@@ -298,6 +299,79 @@ def _normalize_planner_price(price: float) -> float:
         return 0.0
 
 
+def _parse_numeric_ticket_price(value: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if text.lower() == "free":
+        return 0.0
+
+    match = re.search(r"(\d+(?:\.\d+)?)", text.replace(",", ""))
+    if not match:
+        return 0.0
+    return _normalize_planner_price(match.group(1))
+
+
+def _planner_default_time_window(index: int) -> tuple[str, str, int]:
+    slots = [
+        ("09:00", "09:00-18:00", 3),
+        ("13:00", "09:00-18:00", 2),
+        ("16:00", "09:00-20:00", 2),
+        ("10:30", "09:00-18:00", 2),
+    ]
+    return slots[index % len(slots)]
+
+
+def _load_attraction_recommendation_getter():
+    try:
+        from attraction_tool import get_attractions_by_place
+    except Exception:
+        return None
+    return get_attractions_by_place
+
+
+def _planner_attractions_from_recommendations(city: str) -> list[dict]:
+    getter = _load_attraction_recommendation_getter()
+    if getter is None:
+        return []
+
+    try:
+        recommendations = getter(place=city, query_type=f"{city} attractions")
+    except Exception:
+        return []
+    if not isinstance(recommendations, list):
+        return []
+
+    normalized: list[dict] = []
+    seen_names: set[str] = set()
+    for index, item in enumerate(recommendations):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        lowered_name = name.lower()
+        if lowered_name in seen_names:
+            continue
+        seen_names.add(lowered_name)
+
+        preferred_start_time, open_time, duration_hours = _planner_default_time_window(index)
+        normalized.append(
+            {
+                "name": name,
+                "location": str(item.get("location") or city).strip() or city,
+                "information": str(item.get("brief_description") or item.get("description") or f"{city} 热门景点。").strip(),
+                "price": _parse_numeric_ticket_price(item.get("ticket_price")),
+                "currency": "LOCAL",
+                "open_time": open_time,
+                "suggested_duration_hours": duration_hours,
+                "preferred_start_time": preferred_start_time,
+                "image": str(item.get("image") or "").strip(),
+            }
+        )
+    return normalized
+
+
 def _normalize_trip_payload(query: str | dict) -> tuple[list[str], date, date, int]:
     payload = _parse_json_query(query)
     cities = [str(city).strip() for city in payload.get("cities", []) if str(city).strip()]
@@ -361,6 +435,11 @@ def _attractions_for_city(city: str) -> list[dict]:
     catalog = TRAVEL_ATTRACTION_CATALOG.get(_normalize_city_key(city), [])
     if catalog:
         return [dict(item) for item in catalog]
+
+    if city and city != "Trip City":
+        recommended = _planner_attractions_from_recommendations(city)
+        if recommended:
+            return recommended
 
     fallback = dict(FALLBACK_ATTRACTION)
     fallback["name"] = f"{city} City Landmark Tour" if city else fallback["name"]
