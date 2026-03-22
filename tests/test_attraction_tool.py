@@ -1,11 +1,18 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "app" / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.append(str(TOOLS_DIR))
 
 import attraction_tool
+
+
+@pytest.fixture(autouse=True)
+def _stub_recommendation_page_fetch(monkeypatch):
+    monkeypatch.setattr(attraction_tool, "_fetch_url_text", lambda url, timeout=10: "")
 
 
 def test_get_attraction_info_without_api_key_returns_safe_defaults(monkeypatch):
@@ -1084,15 +1091,107 @@ def test_extract_search_candidates_with_gemini_rejects_ungrounded_name_and_clean
     assert results == [
         {
             "name": "The Sanctuary of Truth",
-            "description": "",
+            "description": "Top attractions in Pattaya include The Sanctuary of Truth and Pattaya Floating Market.",
             "image": "",
             "ticket_price": "",
             "sources": ["https://example.com/pattaya-list"],
+            "page_text": "",
             "source_type": "search_entity",
             "source_title": "Best Places To Visit in Pattaya",
             "source_snippet": "Top attractions in Pattaya include The Sanctuary of Truth and Pattaya Floating Market.",
         }
     ]
+
+
+def test_extract_search_candidates_with_gemini_uses_page_text_for_grounding_and_description(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+    captured_prompt = {}
+
+    class DummyResponse:
+        content = '{"attractions":[{"name":"Pattaya Floating Market","description":"","source_index":0}]}'
+
+    class DummyLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def invoke(self, prompt):
+            captured_prompt["value"] = prompt
+            return DummyResponse()
+
+    monkeypatch.setattr(attraction_tool, "ChatGoogleGenerativeAI", DummyLLM)
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: (
+            "Plan your visit to Pattaya. Pattaya Floating Market is a waterfront market featuring canals "
+            "and Thai cultural performances. Opening hours and tickets are listed on this page."
+        ),
+    )
+
+    results = attraction_tool._extract_search_candidates_with_gemini(
+        place="Pattaya",
+        query="Pattaya attractions",
+        organic_results=[
+            {
+                "title": "Things to do in Pattaya",
+                "snippet": "Visitor guide overview.",
+                "link": "https://example.com/pattaya-guide",
+            }
+        ],
+    )
+
+    assert "page_text" in captured_prompt["value"]
+    assert "pattaya floating market is a waterfront market featuring canals and thai cultural performances" in captured_prompt["value"].lower()
+    assert results == [
+        {
+            "name": "Pattaya Floating Market",
+            "description": "Pattaya Floating Market is a waterfront market featuring canals and Thai cultural performances",
+            "image": "",
+            "ticket_price": "",
+            "sources": ["https://example.com/pattaya-guide"],
+            "page_text": "Plan your visit to Pattaya. Pattaya Floating Market is a waterfront market featuring canals and Thai cultural performances. Opening hours and tickets are listed on this page.",
+            "source_type": "search_entity",
+            "source_title": "Things to do in Pattaya",
+            "source_snippet": "Visitor guide overview.",
+        }
+    ]
+
+
+def test_get_attractions_by_place_fallback_prefers_page_text_description(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "_search_google",
+        lambda query, api_key, num=10: {
+            "organic_results": [
+                {
+                    "title": "Sanctuary of Truth",
+                    "link": "https://example.com/sanctuary",
+                    "snippet": "Popular attraction.",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "_fetch_url_text",
+        lambda url, timeout=10: (
+            "The Sanctuary of Truth is an all-wood sanctuary and museum in Pattaya with intricate carved architecture. "
+            "Visitors explore exhibition halls and seaside viewpoints."
+        ),
+    )
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    results = attraction_tool.get_attractions_by_place("Pattaya")
+
+    assert results[0]["name"] == "Sanctuary of Truth"
+    assert "all-wood sanctuary and museum in Pattaya" in results[0]["brief_description"]
 
 
 def test_extract_poi_from_element_rejects_generic_osm_object_without_attraction_signal():

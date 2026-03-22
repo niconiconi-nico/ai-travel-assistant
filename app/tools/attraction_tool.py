@@ -2260,8 +2260,47 @@ def _clean_recommendation_candidate_name(name: str) -> str:
     return text
 
 
-def _candidate_name_grounded_in_source(name: str, source_title: str, source_snippet: str) -> bool:
-    normalized_source = _normalize_match_text(f"{source_title} {source_snippet}")
+def _truncate_recommendation_page_text(text: str, max_chars: int = 2400) -> str:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    cutoff = normalized.rfind(". ", 0, max_chars)
+    if cutoff >= max_chars // 2:
+        return normalized[: cutoff + 1].strip()
+    return normalized[:max_chars].rstrip()
+
+
+def _pick_recommendation_description(name: str, snippet: str, page_text: str) -> str:
+    normalized_snippet = _normalize_text(snippet)
+    excerpt = _truncate_recommendation_page_text(page_text, max_chars=3200)
+    if not excerpt:
+        return normalized_snippet
+
+    sentence_candidates = re.split(r"(?<=[。！？.!?])\s+", excerpt)
+    alias_values = _build_attraction_aliases(name)
+    for sentence in sentence_candidates:
+        cleaned = re.sub(r"\s+", " ", sentence).strip(" -|,:;。.!?[](){}")
+        if len(cleaned) < 24:
+            continue
+        if len(cleaned) > 240:
+            cleaned = cleaned[:240].rstrip()
+        if any(_normalize_match_text(alias) in _normalize_match_text(cleaned) for alias in alias_values if _normalize_match_text(alias)):
+            return cleaned
+
+    first_sentence = ""
+    for sentence in sentence_candidates:
+        cleaned = re.sub(r"\s+", " ", sentence).strip(" -|,:;。.!?[](){}")
+        if len(cleaned) >= 24:
+            first_sentence = cleaned[:240].rstrip()
+            break
+    return first_sentence or normalized_snippet
+
+
+def _candidate_name_grounded_in_source(name: str, source_title: str, source_snippet: str, page_text: str = "") -> bool:
+    normalized_source = _normalize_match_text(f"{source_title} {source_snippet} {page_text}")
     if not normalized_source:
         return False
 
@@ -2483,18 +2522,33 @@ def _extract_search_candidates_with_gemini(
     if not api_key or not organic_results:
         return []
 
+    search_result_contexts: list[dict[str, str]] = []
+    for item in organic_results[:8]:
+        if not isinstance(item, dict):
+            continue
+        link = _normalize_text(item.get("link"))
+        page_text = _truncate_recommendation_page_text(_fetch_url_text(link)) if link else ""
+        search_result_contexts.append(
+            {
+                "title": _normalize_text(item.get("title")),
+                "snippet": _normalize_text(item.get("snippet")),
+                "link": link,
+                "page_text": page_text,
+            }
+        )
+
     payload = {
         "city": place,
         "query": _normalize_text(query),
         "results": [
             {
                 "source_index": index,
-                "title": _normalize_text(item.get("title")),
-                "snippet": _normalize_text(item.get("snippet")),
-                "link": _normalize_text(item.get("link")),
+                "title": context["title"],
+                "snippet": context["snippet"],
+                "link": context["link"],
+                "page_text": context["page_text"],
             }
-            for index, item in enumerate(organic_results[:8])
-            if isinstance(item, dict)
+            for index, context in enumerate(search_result_contexts)
         ],
     }
     if not payload["results"]:
@@ -2502,10 +2556,11 @@ def _extract_search_candidates_with_gemini(
 
     prompt = (
         "You extract actual attraction entities from search results for a travel recommendation system. "
-        "Use ONLY the provided titles/snippets/links. Never invent attraction names. "
-        "If a result is a list article, extract the specific attraction names explicitly mentioned in that title/snippet. "
+        "Use ONLY the provided titles/snippets/links/page_text. Never invent attraction names. "
+        "If a result is a list article, extract the specific attraction names explicitly mentioned in that result's snippet or page_text. "
         "Ignore generic article titles that do not clearly mention a real attraction. "
-        "Descriptions must be short summaries based only on the source snippet. "
+        "Prefer grounding entities in page_text when available. "
+        "Descriptions must be short summaries based only on the source snippet/page_text. "
         "Return JSON only in shape: "
         '{"attractions":[{"name":"","description":"","source_index":0}]}.'
     )
@@ -2527,12 +2582,13 @@ def _extract_search_candidates_with_gemini(
         if not name or not _is_plausible_attraction_name(name):
             continue
         source_index = item.get("source_index", -1)
-        source_item = organic_results[source_index] if isinstance(source_index, int) and 0 <= source_index < len(organic_results) else {}
-        title = _normalize_text(source_item.get("title")) if isinstance(source_item, dict) else ""
-        snippet = _normalize_text(source_item.get("snippet")) if isinstance(source_item, dict) else ""
-        if not _candidate_name_grounded_in_source(name, title, snippet):
+        source_context = search_result_contexts[source_index] if isinstance(source_index, int) and 0 <= source_index < len(search_result_contexts) else {}
+        title = _normalize_text(source_context.get("title")) if isinstance(source_context, dict) else ""
+        snippet = _normalize_text(source_context.get("snippet")) if isinstance(source_context, dict) else ""
+        page_text = _normalize_text(source_context.get("page_text")) if isinstance(source_context, dict) else ""
+        if not _candidate_name_grounded_in_source(name, title, snippet, page_text=page_text):
             continue
-        link = _normalize_text(source_item.get("link")) if isinstance(source_item, dict) else ""
+        link = _normalize_text(source_context.get("link")) if isinstance(source_context, dict) else ""
         candidate = {
             "name": name,
             "description": "" if _has_placeholder_description(_normalize_text(item.get("description"))) else _normalize_text(item.get("description")),
@@ -2542,7 +2598,10 @@ def _extract_search_candidates_with_gemini(
             "source_type": "search_entity",
             "source_title": title,
             "source_snippet": snippet,
+            "page_text": page_text,
         }
+        if not _description_is_usable_for_recommendation(_normalize_text(candidate.get("description"))):
+            candidate["description"] = _pick_recommendation_description(name, snippet, page_text)
         if not _is_valid_recommendation_entity(candidate, place):
             continue
         extracted.append(
@@ -2682,6 +2741,7 @@ def _collect_search_recommendation_candidates(
             title = _normalize_text(item.get("title"))
             link = _normalize_text(item.get("link"))
             snippet = _normalize_text(item.get("snippet"))
+            page_text = _truncate_recommendation_page_text(_fetch_url_text(link)) if link else ""
             name = _clean_recommendation_candidate_name(re.split(r"\s[-|–]\s", title)[0].strip() if title else "")
             if not _is_plausible_attraction_name(name) or _looks_like_generic_destination_candidate(name, place):
                 continue
@@ -2693,13 +2753,14 @@ def _collect_search_recommendation_candidates(
 
             candidate = {
                 "name": name,
-                "description": snippet,
+                "description": _pick_recommendation_description(name, snippet, page_text),
                 "image": "",
                 "ticket_price": "",
                 "sources": [link] if link else [],
                 "source_type": "serpapi",
                 "source_title": title,
                 "source_snippet": snippet,
+                "page_text": page_text,
             }
             if not _is_valid_recommendation_entity(candidate, place):
                 continue
