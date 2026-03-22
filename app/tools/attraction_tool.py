@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -18,16 +19,20 @@ _CACHE_LOCK = threading.Lock()
 _EXACT_PRICE_PATTERNS = [
     r"(?:RM|MYR)\s+\d+(?:[\.,]\d{1,2})?",
     r"USD\s+\d+(?:[\.,]\d{1,2})?",
+    r"\$\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:THB|฿)\s?\d+(?:[\.,]\d{1,2})?",
     r"(?:CNY|RMB)\s+\d+(?:[\.,]\d{1,2})?",
+    r"(?:CNY|RMB)\s*\d+(?:[\.,]\d{1,2})?\s*元?",
     r"[¥]\s?\d+(?:[\.,]\d{1,2})?",
+    r"\d+(?:[\.,]\d{1,2})?\s*元",
 ]
 _FROM_PRICE_PATTERNS = [
-    r"(?:from|starting\s+from|adult\s+ticket)\s*(?:at\s*)?(?:RM|MYR|USD|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?",
-    r"(?:成人票|起价|起)\s*(?:RM|MYR|USD|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:from|starting\s+from|adult\s+ticket)\s*(?:at\s*)?(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?",
+    r"(?:成人票|起价|起)\s*(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
 ]
 _RANGE_PRICE_PATTERNS = [
-    r"(?:RM|MYR|USD|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?(?:RM|MYR|USD|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
-    r"\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?\d+(?:[\.,]\d{1,2})?\s?(?:元|RMB|CNY|¥|RM|MYR|USD)",
+    r"(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)\s?\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?(?:RM|MYR|USD|THB|฿|CNY|RMB|¥)?\s?\d+(?:[\.,]\d{1,2})?",
+    r"\d+(?:[\.,]\d{1,2})?\s?(?:-|–|to|~|～)\s?\d+(?:[\.,]\d{1,2})?\s?(?:元|RMB|CNY|¥|RM|MYR|USD|THB|฿)",
 ]
 _FREE_PRICE_PATTERNS = [r"\bfree\b", r"free\s+entry", r"possibly\s+free", r"免票", r"免费"]
 
@@ -47,6 +52,8 @@ _PLATFORM_PRIORITIES = {
 _FIXED_EXCHANGE_RATES: dict[str, float] = {
     "MYR": 1.0,
     "RM": 1.0,
+    "THB": 0.13,
+    "฿": 0.13,
     "CNY": 0.65,
     "RMB": 0.65,
     "USD": 4.70,
@@ -58,8 +65,13 @@ _FIXED_EXCHANGE_RATES: dict[str, float] = {
 }
 
 
+def _debug_enabled() -> bool:
+    return os.getenv("ATTRACTION_TOOL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _debug_log(message: str) -> None:
-    print(f"[attraction_tool][debug] {message}")
+    if _debug_enabled():
+        print(f"[attraction_tool][debug] {message}", file=sys.stderr)
 
 
 def _normalize_text(value: Any) -> str:
@@ -68,6 +80,216 @@ def _normalize_text(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return str(value).strip()
+
+
+_ATTRACTION_ALIAS_OVERRIDES: dict[str, list[str]] = {
+    "forbidden city": ["the palace museum", "palace museum", "故宫", "故宫博物院", "紫禁城"],
+    "the palace museum": ["forbidden city", "故宫", "故宫博物院", "紫禁城"],
+    "petronas twin towers": [
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+        "双子塔",
+        "雙子塔",
+        "国油双峰塔",
+        "國油雙峰塔",
+        "吉隆坡双子塔",
+        "吉隆坡雙子塔",
+    ],
+    "双子塔": [
+        "petronas twin towers",
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+    ],
+    "雙子塔": [
+        "petronas twin towers",
+        "petronas towers",
+        "klcc twin towers",
+        "menara berkembar petronas",
+    ],
+    "temple of heaven": ["temple of heaven park", "天坛", "天坛公园"],
+    "summer palace": ["颐和园"],
+    "mutianyu great wall": ["长城", "慕田峪长城", "mutianyu"],
+    "badaling great wall": ["长城", "八达岭长城", "badaling"],
+    "beijing ancient observatory": ["北京古观象台", "古观象台", "ancient observatory"],
+    "北京古观象台": ["beijing ancient observatory", "古观象台", "ancient observatory"],
+}
+
+_CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {
+    "beijing": [
+        "forbidden city",
+        "the palace museum",
+        "temple of heaven",
+        "summer palace",
+        "mutianyu great wall",
+        "badaling great wall",
+        "great wall",
+        "故宫",
+        "故宫博物院",
+        "天坛",
+        "颐和园",
+        "长城",
+    ],
+    "kuala lumpur": [
+        "petronas twin towers",
+        "petronas towers",
+        "kl tower",
+        "batu caves",
+        "central market",
+        "双子塔",
+        "吉隆坡双子塔",
+    ],
+    "pattaya": [
+        "the sanctuary of truth",
+        "sanctuary of truth",
+        "pattaya floating market",
+        "big buddha temple",
+        "nong nooch tropical garden",
+    ],
+    "bangkok": [
+        "the grand palace",
+        "wat pho",
+        "wat arun",
+        "chatuchak weekend market",
+    ],
+    "shanghai": [
+        "the bund",
+        "oriental pearl tower",
+        "yu garden",
+        "shanghai tower",
+        "外滩",
+        "东方明珠",
+        "豫园",
+        "上海中心大厦",
+    ],
+    "penang": [
+        "penang hill",
+        "chew jetty",
+        "kek lok si temple",
+        "armenian street",
+    ]
+}
+
+_CITY_PLACE_ALIASES: dict[str, str] = {
+    "北京": "Beijing",
+    "beijing": "Beijing",
+    "上海": "Shanghai",
+    "shanghai": "Shanghai",
+    "芭堤雅": "Pattaya",
+    "芭提雅": "Pattaya",
+    "pattaya": "Pattaya",
+    "曼谷": "Bangkok",
+    "bangkok": "Bangkok",
+    "吉隆坡": "Kuala Lumpur, Malaysia",
+    "kuala lumpur": "Kuala Lumpur, Malaysia",
+    "槟城": "Penang, Malaysia",
+    "檳城": "Penang, Malaysia",
+    "penang": "Penang, Malaysia",
+    "乔治城": "George Town, Penang, Malaysia",
+    "喬治城": "George Town, Penang, Malaysia",
+    "george town": "George Town, Penang, Malaysia",
+}
+
+
+def _normalize_match_text(value: Any) -> str:
+    text = _normalize_text(value).lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
+def _canonicalize_place_name(place: str) -> str:
+    text = _normalize_text(place)
+    if not text:
+        return ""
+    return _CITY_PLACE_ALIASES.get(text.lower(), _CITY_PLACE_ALIASES.get(text, text))
+
+
+def _build_attraction_aliases(attraction_name: str, aliases: list[str] | None = None) -> list[str]:
+    raw_values = [attraction_name, *(aliases or [])]
+    seed = _normalize_match_text(attraction_name)
+    if seed in _ATTRACTION_ALIAS_OVERRIDES:
+        raw_values.extend(_ATTRACTION_ALIAS_OVERRIDES[seed])
+
+    expanded: list[str] = []
+    for value in raw_values:
+        normalized = _normalize_match_text(value)
+        if not normalized:
+            continue
+        expanded.append(normalized)
+        if " " in normalized:
+            expanded.append(normalized.split(" (")[0].strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in expanded:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
+def _preferred_lookup_name(attraction_name: str, aliases: list[str] | None = None) -> str:
+    raw_aliases = [attraction_name, *(aliases or [])]
+    seed = _normalize_match_text(attraction_name)
+    if seed in _ATTRACTION_ALIAS_OVERRIDES:
+        raw_aliases.extend(_ATTRACTION_ALIAS_OVERRIDES[seed])
+
+    for value in raw_aliases:
+        text = _normalize_text(value)
+        if re.search(r"[A-Za-z]", text):
+            return text
+    return _normalize_text(attraction_name)
+
+
+def is_source_relevant_to_attraction(
+    attraction_name: str,
+    source_title: str,
+    source_snippet: str,
+    page_text: str | None = None,
+    aliases: list[str] | None = None,
+) -> bool:
+    alias_values = _build_attraction_aliases(attraction_name, aliases=aliases)
+    if not alias_values:
+        return False
+
+    title_text = _normalize_match_text(source_title)
+    snippet_text = _normalize_match_text(source_snippet)
+    page_match_text = _normalize_match_text(page_text) if page_text else ""
+    combined_text = " ".join(part for part in [title_text, snippet_text, page_match_text] if part).strip()
+
+    def _contains_alias(text: str) -> bool:
+        if not text:
+            return False
+        for alias in alias_values:
+            if alias in text:
+                return True
+        return False
+
+    if _contains_alias(title_text) or _contains_alias(snippet_text):
+        return True
+
+    if page_match_text:
+        compact_aliases = [alias for alias in alias_values if len(alias) >= 4]
+        for alias in compact_aliases:
+            if page_match_text.count(alias) >= 1:
+                return True
+
+    other_aliases: set[str] = set()
+    target_alias_set = set(alias_values)
+    for base_name, alias_list in _ATTRACTION_ALIAS_OVERRIDES.items():
+        normalized_base = _normalize_match_text(base_name)
+        if normalized_base not in target_alias_set:
+            other_aliases.add(normalized_base)
+        for alias in alias_list:
+            normalized_alias = _normalize_match_text(alias)
+            if normalized_alias and normalized_alias not in target_alias_set:
+                other_aliases.add(normalized_alias)
+
+    if combined_text and any(alias in combined_text for alias in other_aliases if len(alias) >= 4):
+        return False
+
+    return True
 
 
 def _load_cache() -> dict[str, dict[str, Any]]:
@@ -342,9 +564,15 @@ def _normalize_currency(value: str) -> str:
     upper = value.upper()
     if "MYR" in upper or re.search(r"\bRM\b", upper):
         return "MYR"
+    if "$" in value:
+        return "USD"
     if "USD" in upper:
         return "USD"
+    if "THB" in upper or "฿" in value:
+        return "THB"
     if "CNY" in upper or "RMB" in upper:
+        return "CNY"
+    if "元" in value:
         return "CNY"
     if "EUR" in upper:
         return "EUR"
@@ -360,7 +588,30 @@ def _normalize_currency(value: str) -> str:
 
 
 def _is_reliable_source_type(source_type: str) -> bool:
-    return source_type in {"official", "government"}
+    lowered = _normalize_text(source_type).lower()
+    return lowered == "government" or lowered.startswith("official")
+
+
+_TICKET_PRICE_JUDGE_PROMPT = """
+You are a strict attraction ticket-price judge.
+Use ONLY the provided candidate pool and source snippets.
+Do NOT browse the web.
+Do NOT invent facts.
+Do NOT choose a number just because it is the only number.
+
+Your task:
+1. Review all ticket-price candidates.
+2. Prefer the candidate that most likely represents the MAIN attraction admission price.
+3. Penalize package prices, tours, bundles, transport fares, parking fees, rentals, guide fees, dining prices, or sub-attraction prices.
+4. Prefer candidates whose context mentions words like ticket, admission, entry, adult, visitor, standard, general admission.
+5. Prefer official/government sources over OTA/platform sources, and platform sources over weak/blog sources.
+6. If multiple candidates agree, treat that as stronger evidence.
+7. Preserve the ORIGINAL currency if you select a non-free price.
+8. If uncertain, return an empty ticket_price.
+
+Return JSON only in this exact shape:
+{"ticket_price":"","price_type":"official|platform|weak|free|range|unknown","price_note":"","selected_candidate_index":-1,"reason":""}
+""".strip()
 
 
 def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -369,6 +620,12 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
         amount = candidate.get("value")
         currency = _normalize_currency(_normalize_text(candidate.get("currency")))
         source_type = _normalize_text(candidate.get("source_type")).lower() or "third_party"
+        if _platform_bucket(source_type) == "official":
+            source_type = "official"
+        elif _platform_bucket(source_type) == "platform":
+            source_type = "third_party"
+        else:
+            source_type = "third_party"
         url = _normalize_text(candidate.get("url"))
         if amount is None or not currency:
             continue
@@ -428,7 +685,72 @@ def resolve_ticket_price(price_candidates: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _extract_price_candidates(text: str, source_type: str, url: str) -> list[dict[str, Any]]:
+def _extract_price_context(text: str, start: int, end: int, window: int = 80) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    snippet = re.sub(r"\s+", " ", text[left:right]).strip()
+    return snippet[:220]
+
+
+def _platform_bucket(source_type: str) -> str:
+    lowered = _normalize_text(source_type).lower()
+    if lowered.startswith("official") or lowered in {"official", "government"}:
+        return "official"
+    if any(token in lowered for token in ["ota", "klook", "trip", "kkday", "platform"]):
+        return "platform"
+    return "weak"
+
+
+def _score_ticket_candidate(candidate: dict[str, Any]) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    context = _normalize_text(candidate.get("context")).lower()
+    source_type = _normalize_text(candidate.get("source_type"))
+    bucket = _platform_bucket(source_type)
+
+    if bucket == "official":
+        score += 50
+        reasons.append("official/government source")
+    elif bucket == "platform":
+        score += 15
+        reasons.append("platform source")
+    else:
+        score -= 10
+        reasons.append("weak/non-official source")
+
+    if any(token in context for token in ["ticket", "admission", "entry", "visitor", "general admission", "standard"]):
+        score += 20
+        reasons.append("ticket/admission wording")
+    if any(token in context for token in ["adult", "成人"]):
+        score += 10
+        reasons.append("adult ticket wording")
+    if any(token in context for token in ["child", "children", "学生", "senior"]):
+        score += 3
+        reasons.append("structured pricing wording")
+
+    if any(token in context for token in ["parking", "car park", "locker", "rental", "guide fee"]):
+        score -= 30
+        reasons.append("non-admission fee wording")
+    if any(token in context for token in ["tour", "package", "combo", "bundle", "transfer", "pickup", "add-on", "addon"]):
+        score -= 35
+        reasons.append("package/tour wording")
+    if any(token in context for token in ["start from", "starting from", "prices vary", "vary by package", "from rm", "from usd", "from thb"]):
+        score -= 35
+        reasons.append("uncertain starting price wording")
+    if any(token in context for token in ["blog", "itinerary", "travel guide"]):
+        score -= 20
+        reasons.append("weak editorial context")
+
+    return score, reasons
+
+
+def _extract_price_candidates(
+    text: str,
+    source_type: str,
+    url: str,
+    title: str = "",
+    source_label: str = "",
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     patterns = [*_EXACT_PRICE_PATTERNS, *_FROM_PRICE_PATTERNS, *_RANGE_PRICE_PATTERNS]
     for pattern in patterns:
@@ -439,15 +761,99 @@ def _extract_price_candidates(text: str, source_type: str, url: str) -> list[dic
             if not currency or not numbers:
                 continue
             for number in numbers[:2]:
+                context = _extract_price_context(text, match.start(), match.end())
+                score, reasons = _score_ticket_candidate(
+                    {
+                        "context": context,
+                        "source_type": source_type,
+                    }
+                )
                 candidates.append(
                     {
                         "value": number,
                         "currency": currency,
+                        "raw_price_text": value,
+                        "context": context,
+                        "title": title,
+                        "source": source_label or source_type,
                         "source_type": source_type,
+                        "source_bucket": _platform_bucket(source_type),
+                        "score": score,
+                        "score_reasons": reasons,
                         "url": url,
                     }
                 )
     return candidates
+
+
+def _dedupe_ticket_price_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True):
+        key = (
+            _normalize_text(candidate.get("raw_price_text")).lower(),
+            _normalize_text(candidate.get("url")).lower(),
+            _normalize_text(candidate.get("context")).lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def build_ticket_price_candidate_pool(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source in sources[:8]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
+
+        source_type, _ = _classify_source_type(title=title, link=link, snippet=snippet)
+        combined = f"{title}\n{snippet}".strip()
+        if combined:
+            candidates.extend(
+                _extract_price_candidates(
+                    combined,
+                    source_type=source_type,
+                    url=link,
+                    title=title,
+                    source_label=source_type,
+                )
+            )
+
+        page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
+        if page_text:
+            candidates.extend(
+                _extract_price_candidates(
+                    page_text,
+                    source_type=source_type,
+                    url=link,
+                    title=title,
+                    source_label=source_type,
+                )
+            )
+
+    return _dedupe_ticket_price_candidates(candidates)
 
 
 def _infer_source_type(link: str) -> str:
@@ -488,7 +894,7 @@ def _is_valid_price_text(value: str) -> bool:
     if not re.search(r"\d", value):
         return False
 
-    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bCNY\b|\bRMB\b|\bEUR\b|\bSGD\b|\bJPY\b|\bGBP\b|¥)", value, re.IGNORECASE)
+    has_currency = re.search(r"(?:\bRM\b|\bMYR\b|\bUSD\b|\bTHB\b|\bCNY\b|\bRMB\b|\bEUR\b|\bSGD\b|\bJPY\b|\bGBP\b|¥|฿)", value, re.IGNORECASE)
     return bool(has_currency)
 
 
@@ -596,18 +1002,12 @@ def fetch_nominatim_place(attraction_name: str, location: str | None = None) -> 
     }
 
 
-def _collect_price_candidates_from_sources(sources: list[dict[str, str]]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for source in sources:
-        snippet = _normalize_text(source.get("snippet"))
-        title = _normalize_text(source.get("title"))
-        link = _normalize_text(source.get("link"))
-        combined = f"{title} {snippet}".strip()
-        if not combined:
-            continue
-        source_type = _infer_source_type(link)
-        candidates.extend(_extract_price_candidates(combined, source_type=source_type, url=link))
-    return candidates
+def _collect_price_candidates_from_sources(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    return build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
 
 
 def _extract_domain(url: str) -> str:
@@ -673,11 +1073,22 @@ def _is_strong_ticket_source_type(source_type: str) -> bool:
     }
 
 
-def _has_strong_ticket_source_evidence(sources: list[dict[str, str]]) -> bool:
+def _has_strong_ticket_source_evidence(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> bool:
     for src in sources:
         title = _normalize_text(src.get("title"))
         link = _normalize_text(src.get("link"))
         snippet = _normalize_text(src.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         source_type, _ = _classify_source_type(title=title, link=link, snippet=snippet)
         if _is_strong_ticket_source_type(source_type):
             return True
@@ -844,12 +1255,32 @@ def _pick_ticket_price_from_values(values: list[dict[str, Any]]) -> str:
     return ""
 
 
-def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_name: str = "") -> str:
+def resolve_ticket_price_from_sources(
+    sources: list[dict[str, str]],
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> str:
+    candidate_pool = build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
+    if candidate_pool:
+        if max(int(candidate.get("score", 0)) for candidate in candidate_pool) <= 20:
+            return ""
+        resolved = resolve_ticket_price(candidate_pool)
+        picked = _normalize_text(resolved.get("ticket_price"))
+        if picked:
+            return picked
+
     ranked = []
     for src in sources:
         title = _normalize_text(src.get("title"))
         link = _normalize_text(src.get("link"))
         snippet = _normalize_text(src.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         if not _looks_like_ticket_source(title, link, snippet):
             continue
         source_type, score = _classify_source_type(title=title, link=link, snippet=snippet)
@@ -865,6 +1296,14 @@ def resolve_ticket_price_from_sources(sources: list[dict[str, str]], attraction_
             all_values.extend(_extract_strong_ticket_values(combined, attraction_name=attraction_name))
 
         page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
         if page_text and len(page_text) >= 20:
             all_values.extend(_extract_strong_ticket_values(page_text, attraction_name=attraction_name))
         elif source_type == "ota_product_page" and combined:
@@ -911,14 +1350,17 @@ def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
     ticket_price = _normalize_text(payload.get("ticket_price"))
     price_type = _normalize_text(payload.get("price_type")).lower() or "unknown"
     price_note = _normalize_text(payload.get("price_note"))
+    if price_type == "platform":
+        price_type = "third_party"
+    elif price_type == "weak":
+        price_type = "third_party"
 
     if ticket_price and ticket_price != "Free":
         ticket_price = ticket_price.replace("-", "–")
-        if re.fullmatch(r"\$\s*\d+(?:\.\d{1,2})?", ticket_price):
-            usd_value = float(re.findall(r"\d+(?:\.\d{1,2})?", ticket_price)[0])
-            converted = convert_to_myr(usd_value, "USD")
-            ticket_price = _format_rm_clean(converted) if converted is not None else ""
-        if not _is_valid_ticket_price_output(ticket_price):
+        normalized_ticket_price = normalize_ticket_price(ticket_price)
+        if normalized_ticket_price:
+            ticket_price = normalized_ticket_price
+        elif not _is_valid_ticket_price_output(ticket_price):
             ticket_price = ""
 
     if ticket_price == "Free":
@@ -934,22 +1376,82 @@ def _parse_gemini_ticket_payload(raw_text: str) -> dict[str, str]:
     }
 
 
+def _parse_reasonableness_gemini_payload(raw_text: str) -> dict[str, str]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    cleaned = text
+    if "```" in cleaned:
+        cleaned = "\n".join(line for line in cleaned.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(cleaned[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    opening_hours = _normalize_opening_hours_value(_normalize_text(payload.get("opening_hours")))
+    ticket_price = _normalize_text(payload.get("ticket_price"))
+    ticket_status = _normalize_text(payload.get("ticket_status")).lower() or "unknown"
+    price_note = _normalize_text(payload.get("price_note"))
+
+    if ticket_price:
+        normalized_ticket_price = normalize_ticket_price(ticket_price)
+        if normalized_ticket_price:
+            ticket_price = normalized_ticket_price
+        elif ticket_price != "Free":
+            ticket_price = ""
+
+    if ticket_price == "Free":
+        ticket_status = "free"
+
+    if ticket_status not in {"free", "paid", "partially_paid", "unknown"}:
+        ticket_status = "unknown"
+
+    return {
+        "opening_hours": opening_hours,
+        "ticket_price": ticket_price,
+        "ticket_status": ticket_status,
+        "price_note": price_note,
+    }
+
+
 def resolve_ticket_price_with_gemini(
     attraction_name: str,
     location: str | None,
     sources: list[dict[str, str]],
     rule_based_price: str = "",
+    aliases: list[str] | None = None,
 ) -> dict[str, str]:
     api_key = _resolve_gemini_api_key()
     _debug_log(f"gemini_api_key_found={bool(api_key)}")
     if not api_key or not sources:
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
 
+    candidate_pool = build_ticket_price_candidate_pool(sources=sources, attraction_name=attraction_name, aliases=aliases)
     ranked_sources: list[tuple[int, dict[str, str], str]] = []
     for source in sources[:8]:
         title = _normalize_text(source.get("title"))
         link = _normalize_text(source.get("link"))
         snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
         source_type, source_score = _classify_source_type(title=title, link=link, snippet=snippet)
         if not _looks_like_ticket_source(title, link, snippet) and source_type not in {
             "official_homepage",
@@ -964,6 +1466,14 @@ def resolve_ticket_price_with_gemini(
         _debug_log(f"ticket_source_selected url={link} source_type={source_type} score={source_score}")
         page_text = _fetch_url_text(link)
         _debug_log(f"fetched_page_text_length url={link} length={len(page_text)}")
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
         if len(page_text) < 20 and source_type not in {"ota_product_page", "official_homepage", "official_visitor_info", "official_faq"}:
             continue
         if len(page_text) < 40 and not snippet:
@@ -999,22 +1509,27 @@ def resolve_ticket_price_with_gemini(
         "attraction_name": attraction_name,
         "location": location or "",
         "rule_based_price": rule_based_price,
+        "candidate_pool": [
+            {
+                "value": candidate.get("value"),
+                "currency": candidate.get("currency"),
+                "raw_price_text": candidate.get("raw_price_text"),
+                "context": candidate.get("context"),
+                "source_type": candidate.get("source_type"),
+                "source_bucket": candidate.get("source_bucket"),
+                "score": candidate.get("score"),
+                "score_reasons": candidate.get("score_reasons"),
+                "url": candidate.get("url"),
+                "title": candidate.get("title"),
+            }
+            for candidate in candidate_pool[:20]
+        ],
         "sources": source_entries,
     }
 
-    prompt = (
-        "You are a strict ticket-price resolver. Use ONLY provided text. "
-        "Do not browse. Do not guess. Do not use outside knowledge. "
-        "If uncertain, return empty ticket_price. "
-        "Focus on main attraction admission, avoid packages/add-ons/sub-attractions. "
-        "Return JSON only with shape: "
-        '{"ticket_price":"PRICE_OR_EMPTY","price_type":"official|third_party|free|range|unknown","price_note":"SHORT_REASON"}. '
-        "Allowed ticket_price forms: RM 16, RM 16–RM 30, Free, or ''."
-    )
-
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
-        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+        response = llm.invoke(f"{_TICKET_PRICE_JUDGE_PROMPT}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
     except Exception:
         _debug_log("gemini_call_failed=True")
         return {"ticket_price": "", "price_type": "unknown", "price_note": ""}
@@ -1023,6 +1538,83 @@ def resolve_ticket_price_with_gemini(
     _debug_log(f"gemini_raw_response={content[:500]}")
     parsed = _parse_gemini_ticket_payload(content)
     return parsed
+
+
+def analyze_visit_reasonableness_with_gemini(
+    attraction_name: str,
+    location: str | None,
+    sources: list[dict[str, str]],
+    current_opening_hours: str = "",
+    current_ticket_price: str = "",
+    aliases: list[str] | None = None,
+) -> dict[str, str]:
+    api_key = _resolve_gemini_api_key()
+    if not api_key or not sources:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    source_entries: list[dict[str, str]] = []
+    for source in sources[:6]:
+        title = _normalize_text(source.get("title"))
+        link = _normalize_text(source.get("link"))
+        snippet = _normalize_text(source.get("snippet"))
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
+            continue
+        page_text = _fetch_url_text(link)
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            page_text=page_text,
+            aliases=aliases,
+        ):
+            continue
+        source_entries.append(
+            {
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "content": page_text[:2200],
+            }
+        )
+
+    if not source_entries:
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    payload = {
+        "attraction_name": attraction_name,
+        "location": location or "",
+        "current_opening_hours": current_opening_hours,
+        "current_ticket_price": current_ticket_price,
+        "sources": source_entries,
+    }
+    prompt = (
+        "You analyze attraction visit practicality from provided sources only. "
+        "Do not browse. Do not invent facts. "
+        "Infer whether the main attraction is free, paid, partially_paid, or unknown. "
+        "Use partially_paid when the landmark itself is free but a specific deck/exhibit/sub-attraction appears paid. "
+        "For landmark-style towers/buildings/plazas, prefer free or partially_paid instead of paid when no explicit admission amount is present. "
+        "If official or source snippets clearly state opening hours, return them. "
+        "If no price is explicit but sources strongly imply free access, return ticket_status=free and ticket_price='Free'. "
+        "If uncertain, keep ticket_price empty and ticket_status=unknown. "
+        "Return JSON only with shape: "
+        '{"opening_hours":"","ticket_price":"","ticket_status":"free|paid|partially_paid|unknown","price_note":""}.'
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        _debug_log("reasonableness_gemini_call_failed=True")
+        return {"opening_hours": "", "ticket_price": "", "ticket_status": "unknown", "price_note": ""}
+
+    raw = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"reasonableness_gemini_raw={raw[:500]}")
+    return _parse_reasonableness_gemini_payload(raw)
 
 
 def _classify_platform(link: str, title: str = "") -> str:
@@ -1048,7 +1640,12 @@ def _classify_platform(link: str, title: str = "") -> str:
     return "other"
 
 
-def collect_preferred_sources(results: list[dict[str, Any]], min_count: int = 3) -> list[dict[str, str]]:
+def collect_preferred_sources(
+    results: list[dict[str, Any]],
+    min_count: int = 3,
+    attraction_name: str = "",
+    aliases: list[str] | None = None,
+) -> list[dict[str, str]]:
     ranked: list[tuple[int, dict[str, str]]] = []
     seen_links: set[str] = set()
 
@@ -1057,6 +1654,13 @@ def collect_preferred_sources(results: list[dict[str, Any]], min_count: int = 3)
         link = _normalize_text(item.get("link"))
         snippet = _normalize_text(item.get("snippet") or item.get("snippet_highlighted_words"))
         if not (title or link or snippet):
+            continue
+        if attraction_name and not is_source_relevant_to_attraction(
+            attraction_name=attraction_name,
+            source_title=title,
+            source_snippet=snippet,
+            aliases=aliases,
+        ):
             continue
 
         dedup_key = link or title.lower()
@@ -1227,10 +1831,210 @@ def _normalize_wikipedia_title(value: str) -> str:
     return text
 
 
+_OSM_ALLOWED_TOURISM_VALUES = {
+    "attraction",
+    "museum",
+    "viewpoint",
+    "theme_park",
+    "gallery",
+    "zoo",
+    "aquarium",
+    "artwork",
+}
+_OSM_ALLOWED_LEISURE_VALUES = {"park", "garden", "nature_reserve", "water_park", "theme_park"}
+_OSM_ALLOWED_HISTORIC_VALUES = {"castle", "fort", "ruins", "archaeological_site", "city_gate"}
+_OSM_BLOCKED_TAG_VALUES = {
+    ("historic", "aircraft"),
+    ("historic", "milestone"),
+    ("historic", "memorial"),
+    ("historic", "monument"),
+    ("amenity", "clock"),
+    ("amenity", "parking"),
+}
+_ARTICLE_OR_PRODUCT_PATTERNS = [
+    r"things to do",
+    r"best attractions",
+    r"top attractions",
+    r"tourist attractions",
+    r"must-see attractions",
+    r"must visit attractions",
+    r"sights\s*(?:&|and)\s*attractions",
+    r"discover the",
+    r"travel guide",
+    r"official site",
+    r"places to visit",
+    r"historical landmarks",
+    r"historical sites",
+    r"hidden gems",
+    r"itinerary",
+    r"top recommendations",
+    r"landmark tours",
+    r"tour package",
+    r"自由行",
+    r"必去",
+    r"必玩",
+    r"景點推薦",
+    r"景点推荐",
+    r"熱門旅遊景點",
+    r"热门旅游景点",
+    r"一日遊行程",
+    r"一日游行程",
+    r"親子好去處",
+    r"亲子好去处",
+    r"親子遊景點推薦",
+    r"亲子游景点推荐",
+    r"旅遊攻略",
+    r"旅游攻略",
+    r"門票",
+    r"门票",
+    r"交通.*美食",
+    r"景點美食",
+    r"景点美食",
+]
+_GENERIC_OBJECT_PATTERNS = [
+    r"^airplane$",
+    r"\bmilestone\b",
+    r"\bmonument\b",
+    r"\bmemorial\b",
+    r"\bstation\b",
+    r"\bterminal\b",
+    r"\bpier\b",
+    r"\bclock\b",
+    r"\broundabout\b",
+    r"\bstatue\b",
+]
+_ATTRACTION_NAME_HINTS = [
+    "museum", "temple", "palace", "park", "garden", "tower", "hill", "wall", "lake", "street",
+    "market", "jetty", "mosque", "church", "cathedral", "fort", "village", "zoo", "aquarium",
+    "sanctuary", "beach", "walk", "walking street", "viewpoint", "dolphinarium", "island",
+    "博物院", "博物馆", "公园", "寺", "寺庙", "故宫", "长城", "胡同", "广场", "乐园", "古城", "山", "湖", "海滩",
+]
+_WEAK_DESCRIPTION_PATTERNS = [
+    r"^an airplane is\b",
+    r"^overview\.",
+    r"full-day tour",
+    r"hotel pickup",
+    r"熱門景點",
+    r"热门景点",
+    r"含\d+個景點",
+    r"top attractions include",
+]
+
+
+def _has_attraction_name_hint(text: str) -> bool:
+    normalized = _normalize_text(text)
+    lowered = normalized.lower()
+    return any(token in lowered or token in normalized for token in _ATTRACTION_NAME_HINTS)
+
+
+def _looks_like_article_or_product_text(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    if not normalized:
+        return False
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _ARTICLE_OR_PRODUCT_PATTERNS):
+        return True
+    if re.search(r"【\s*20\d{2}.*】", normalized):
+        return True
+    if re.search(r"\b(?:youtube|reddit|facebook|instagram)\b", normalized):
+        return True
+    return bool(re.search(r"\btours?\b", normalized))
+
+
+def _looks_like_generic_object_name(name: str) -> bool:
+    normalized = _normalize_text(name).strip().lower()
+    if not normalized:
+        return True
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in _GENERIC_OBJECT_PATTERNS)
+
+
+def _has_city_iconic_match(name: str, city: str) -> bool:
+    normalized_name = _normalize_match_text(name)
+    normalized_city = _normalize_text(city).lower()
+    for city_key, iconic_terms in _CITY_ICONIC_ATTRACTIONS.items():
+        if city_key in normalized_city and any(term in normalized_name for term in iconic_terms):
+            return True
+    return False
+
+
+def _description_is_usable_for_recommendation(text: str) -> bool:
+    value = _normalize_text(text)
+    if _has_placeholder_description(value):
+        return False
+    lowered = value.lower()
+    return not any(re.search(pattern, lowered, re.IGNORECASE) for pattern in _WEAK_DESCRIPTION_PATTERNS)
+
+
+def _infer_recommendation_source_bucket(candidate: dict[str, Any]) -> str:
+    source_type = _normalize_text(candidate.get("source_type")).lower()
+    link = ""
+    sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+    if sources:
+        link = _normalize_text(sources[0])
+    title = _normalize_text(candidate.get("source_title") or candidate.get("name"))
+    snippet = _normalize_text(candidate.get("source_snippet") or candidate.get("description"))
+    haystack = f"{link} {title} {snippet}".lower()
+    platform = _classify_platform(link, title)
+
+    if source_type in {"osm", "osm_poi"}:
+        return "osm_poi"
+    if source_type in {"wikipedia"} or platform == "wikipedia":
+        return "wiki_entity"
+    if source_type == "search_entity":
+        return "search_entity"
+    if platform == "official":
+        return "official_attraction_page" if _has_attraction_name_hint(title) else "official_destination_page"
+    if platform in {"trip", "klook", "kkday", "ctrip"}:
+        return "ota_product_page" if _looks_like_article_or_product_text(haystack) else "ota_destination_page"
+    if any(token in haystack for token in ["youtube", "youtu.be", "episode", "ep5", "ep6"]):
+        return "video_page"
+    if any(token in haystack for token in ["reddit", "forum", "quora"]):
+        return "ugc_discussion"
+    if _looks_like_article_or_product_text(haystack) or platform in {"travel_guide", "tripadvisor"}:
+        return "travel_blog_article"
+    if source_type == "offline_catalog":
+        return "offline_seed"
+    if source_type == "serpapi":
+        return "search_entity"
+    return source_type or "other"
+
+
+def _is_supported_osm_candidate(tags: dict[str, Any], name: str) -> bool:
+    tourism = _normalize_text(tags.get("tourism")).lower()
+    leisure = _normalize_text(tags.get("leisure")).lower()
+    historic = _normalize_text(tags.get("historic")).lower()
+    amenity = _normalize_text(tags.get("amenity")).lower()
+    railway = _normalize_text(tags.get("railway")).lower()
+    man_made = _normalize_text(tags.get("man_made")).lower()
+
+    if any((key, value) in _OSM_BLOCKED_TAG_VALUES for key, value in [("historic", historic), ("amenity", amenity)]):
+        return False
+    if railway or man_made in {"tower", "mast", "water_tower"}:
+        return False
+    if _looks_like_generic_object_name(name):
+        return False
+
+    allowed = (
+        tourism in _OSM_ALLOWED_TOURISM_VALUES
+        or leisure in _OSM_ALLOWED_LEISURE_VALUES
+        or historic in _OSM_ALLOWED_HISTORIC_VALUES
+    )
+    if not allowed:
+        return False
+
+    evidence = any(
+        _normalize_text(tags.get(field))
+        for field in ["description", "short_description", "image", "wikimedia_commons", "wikipedia", "wikidata", "website", "url"]
+    )
+    strong_type = tourism in {"attraction", "museum", "theme_park", "zoo", "aquarium"} or historic in {"castle", "fort"}
+    return strong_type or evidence or _has_attraction_name_hint(name)
+
+
 def _extract_poi_from_element(element: dict[str, Any]) -> dict[str, Any]:
     tags = element.get("tags") if isinstance(element.get("tags"), dict) else {}
     name = _normalize_text(tags.get("name"))
     if not _is_valid_entity_name(name):
+        return {}
+    if not _is_supported_osm_candidate(tags, name):
         return {}
 
     poi: dict[str, Any] = {
@@ -1244,6 +2048,10 @@ def _extract_poi_from_element(element: dict[str, Any]) -> dict[str, Any]:
         "website": _normalize_text(tags.get("website") or tags.get("url")),
         "osm_type": _normalize_text(element.get("type")),
         "osm_id": _normalize_text(element.get("id")),
+        "tourism": _normalize_text(tags.get("tourism")),
+        "historic": _normalize_text(tags.get("historic")),
+        "amenity": _normalize_text(tags.get("amenity")),
+        "leisure": _normalize_text(tags.get("leisure")),
     }
     if not poi["image"]:
         commons = _normalize_text(tags.get("wikimedia_commons"))
@@ -1274,9 +2082,15 @@ def _get_osm_city_pois(place: str, limit: int = 12) -> list[dict[str, Any]]:
       nwr(around:{radius},{lat},{lon})[tourism=attraction];
       nwr(around:{radius},{lat},{lon})[tourism=museum];
       nwr(around:{radius},{lat},{lon})[tourism=viewpoint];
-      nwr(around:{radius},{lat},{lon})[historic];
-      nwr(around:{radius},{lat},{lon})[amenity=place_of_worship];
+      nwr(around:{radius},{lat},{lon})[tourism=theme_park];
+      nwr(around:{radius},{lat},{lon})[tourism=gallery];
+      nwr(around:{radius},{lat},{lon})[tourism=zoo];
+      nwr(around:{radius},{lat},{lon})[tourism=aquarium];
+      nwr(around:{radius},{lat},{lon})[historic=castle];
+      nwr(around:{radius},{lat},{lon})[historic=fort];
+      nwr(around:{radius},{lat},{lon})[historic=ruins];
       nwr(around:{radius},{lat},{lon})[leisure=park];
+      nwr(around:{radius},{lat},{lon})[leisure=garden];
     );
     out tags center 120;
     """
@@ -1380,26 +2194,178 @@ def _enrich_poi_with_knowledge(poi: dict[str, Any], location: str | None = None)
     return enriched
 
 def _is_plausible_attraction_name(name: str) -> bool:
-    text = name.strip()
+    text = re.sub(r"\s+", " ", name).strip(" -|,:;。.!?[](){}")
     if len(text) < 3:
         return False
-    bad_tokens = [
-        "things to do",
-        "best attractions",
-        "tripadvisor",
-        "wikipedia",
-        "official site",
-        "guide",
-        "攻略",
-        "门票",
-        "票价",
-    ]
+
     lowered = text.lower()
-    if any(token in lowered for token in bad_tokens):
+    if _looks_like_article_or_product_text(text):
         return False
+    if _looks_like_generic_object_name(text):
+        return False
+
+    generic_patterns = [
+        r"^top\s+\d+",
+        r"^the\s+\d+\s+best",
+        r"^\d+\s+(best|top|beautiful|must-see|must visit)",
+        r"most beautiful",
+        r"beautiful sights",
+        r"what to do",
+        r"where to go",
+        r"places to visit in ",
+        r"best places to visit",
+        r"top places to visit",
+        r"historical sites",
+        r"自由行",
+        r"景點推薦|景点推荐",
+        r"親子好去處|亲子好去处",
+        r"一日遊行程|一日游行程",
+        r"熱門旅遊景點|热门旅游景点",
+        r"visit .* in ",
+        r"attractions? in ",
+        r"guide to",
+        r"nearby",
+        r"\btours?\b$",
+        r"^ep\d+\b",
+    ]
+    if any(re.search(pattern, lowered) for pattern in generic_patterns):
+        return False
+
     if re.search(r"\b\d{4}\b", text):
         return False
+    if re.fullmatch(r"[A-Za-z]{1,4}\d*[-–:]?", text):
+        return False
+
+    if not _has_attraction_name_hint(text) and len(text.split()) > 8:
+        return False
+
     return True
+
+
+def _clean_recommendation_candidate_name(name: str) -> str:
+    text = _normalize_text(name)
+    if not text:
+        return ""
+
+    text = re.split(r"\s[-|–:]\s", text)[0].strip()
+    text = re.sub(r"^(nearby|附近)[:：\s]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\d+\s*", "", text)
+    if re.search(r"[\u4e00-\u9fff]", text) and re.search(r"[A-Za-z]", text):
+        latin_segments = [seg.strip() for seg in re.findall(r"[A-Za-z][A-Za-z0-9'&\-\s]{2,}", text) if seg.strip()]
+        plausible_latin = [seg for seg in latin_segments if _is_plausible_attraction_name(seg)]
+        if plausible_latin:
+            text = max(plausible_latin, key=len)
+    if not _is_plausible_attraction_name(text):
+        return ""
+    return text
+
+
+def _truncate_recommendation_page_text(text: str, max_chars: int = 2400) -> str:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    cutoff = normalized.rfind(". ", 0, max_chars)
+    if cutoff >= max_chars // 2:
+        return normalized[: cutoff + 1].strip()
+    return normalized[:max_chars].rstrip()
+
+
+def _pick_recommendation_description(name: str, snippet: str, page_text: str) -> str:
+    normalized_snippet = _normalize_text(snippet)
+    excerpt = _truncate_recommendation_page_text(page_text, max_chars=3200)
+    if not excerpt:
+        return normalized_snippet
+
+    sentence_candidates = re.split(r"(?<=[。！？.!?])\s+", excerpt)
+    alias_values = _build_attraction_aliases(name)
+    for sentence in sentence_candidates:
+        cleaned = re.sub(r"\s+", " ", sentence).strip(" -|,:;。.!?[](){}")
+        if len(cleaned) < 24:
+            continue
+        if len(cleaned) > 240:
+            cleaned = cleaned[:240].rstrip()
+        if any(_normalize_match_text(alias) in _normalize_match_text(cleaned) for alias in alias_values if _normalize_match_text(alias)):
+            return cleaned
+
+    first_sentence = ""
+    for sentence in sentence_candidates:
+        cleaned = re.sub(r"\s+", " ", sentence).strip(" -|,:;。.!?[](){}")
+        if len(cleaned) >= 24:
+            first_sentence = cleaned[:240].rstrip()
+            break
+    return first_sentence or normalized_snippet
+
+
+def _candidate_name_grounded_in_source(name: str, source_title: str, source_snippet: str, page_text: str = "") -> bool:
+    normalized_source = _normalize_match_text(f"{source_title} {source_snippet} {page_text}")
+    if not normalized_source:
+        return False
+
+    for alias in _build_attraction_aliases(name):
+        normalized_alias = _normalize_match_text(alias)
+        if not normalized_alias:
+            continue
+        if normalized_alias in normalized_source:
+            return True
+        alias_tokens = [token for token in normalized_alias.split() if len(token) >= 4]
+        if alias_tokens and all(token in normalized_source for token in alias_tokens):
+            return True
+    return False
+
+
+def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
+    normalized_name = _normalize_text(name).strip().lower()
+    normalized_city = _normalize_text(city).split(",", 1)[0].strip().lower()
+    if not normalized_name:
+        return True
+    if normalized_city and normalized_name == normalized_city:
+        return True
+    if _looks_like_article_or_product_text(normalized_name):
+        return True
+    if _looks_like_generic_object_name(normalized_name):
+        return True
+    if normalized_city and normalized_city in normalized_name and not _has_attraction_name_hint(normalized_name):
+        return True
+    return False
+
+
+def _is_valid_recommendation_entity(candidate: dict[str, Any], city: str) -> bool:
+    name = _normalize_text(candidate.get("name"))
+    if not _is_plausible_attraction_name(name):
+        return False
+    if _looks_like_generic_destination_candidate(name, city):
+        return False
+
+    description = _normalize_text(candidate.get("description") or candidate.get("source_snippet"))
+    source_title = _normalize_text(candidate.get("source_title"))
+    source_bucket = _infer_recommendation_source_bucket(candidate)
+    if source_bucket == "osm_poi":
+        return True
+    if source_bucket in {"official_destination_page", "ota_product_page", "ota_destination_page", "travel_blog_article", "ugc_discussion", "video_page"}:
+        return False
+
+    if _looks_like_article_or_product_text(source_title) and not _has_city_iconic_match(name, city):
+        return False
+    if _looks_like_generic_object_name(name):
+        return False
+
+    sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+    has_authority = any(
+        token
+        for token in [
+            _normalize_text(candidate.get("wikipedia")),
+            _normalize_text(candidate.get("wikidata")),
+            _normalize_text(candidate.get("website")),
+        ]
+    ) or any(
+        _classify_platform(_normalize_text(source), source_title) in {"official", "wikipedia"}
+        for source in sources
+    )
+    has_evidence = has_authority or _description_is_usable_for_recommendation(description) or _has_attraction_name_hint(name) or _has_city_iconic_match(name, city)
+    return has_evidence
 
 
 def _has_placeholder_description(text: str) -> bool:
@@ -1411,8 +2377,17 @@ def _has_placeholder_description(text: str) -> bool:
         "popular attraction in this destination",
         "top attraction",
         "must-visit attraction",
+        "a popular attraction.",
+        "a popular temple attraction.",
+        "a popular street attraction.",
+        "a popular shopping center.",
+        "a popular water park.",
+        "a recommended beach attraction.",
+        "a recommended night market attraction.",
     }
-    return value in placeholders
+    if value in placeholders:
+        return True
+    return bool(re.fullmatch(r"a\s+(popular|recommended)\s+.+attraction\.", value))
 
 
 def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
@@ -1422,19 +2397,41 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
     image = _normalize_text(candidate.get("image"))
     sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
     source_count = len([s for s in sources if _normalize_text(s)])
+    source_bucket = _infer_recommendation_source_bucket(candidate)
 
     score = 0
-    if not _has_placeholder_description(desc):
-        score += 4
+    if _has_city_iconic_match(name, city):
+        score += 40
+    if _description_is_usable_for_recommendation(desc):
+        score += 8
     if image.startswith("http"):
-        score += 2
+        score += 5
     if ticket and _is_valid_ticket_price_output(ticket):
-        score += 2
-    score += min(3, source_count)
+        score += 3
+    score += min(4, source_count)
     if city.lower() in name.lower():
-        score += 1
-    if any(token in name.lower() for token in ["museum", "temple", "hill", "fort", "heritage", "park", "tower"]):
-        score += 1
+        score += 2
+    if _has_attraction_name_hint(name):
+        score += 10
+
+    source_bucket_scores = {
+        "official_attraction_page": 25,
+        "wiki_entity": 20,
+        "osm_poi": 15,
+        "offline_seed": 15,
+        "search_entity": 22,
+        "official_destination_page": -40,
+        "ota_product_page": -25,
+        "ota_destination_page": -25,
+        "travel_blog_article": -35,
+        "ugc_discussion": -35,
+        "video_page": -35,
+    }
+    score += source_bucket_scores.get(source_bucket, 0)
+    if _looks_like_generic_object_name(name):
+        score -= 60
+    if not _description_is_usable_for_recommendation(desc) and not _has_city_iconic_match(name, city):
+        score -= 20
     return score
 
 
@@ -1475,6 +2472,142 @@ def _parse_recommendation_gemini_payload(raw_text: str) -> list[dict[str, str]]:
             }
         )
     return normalized
+
+
+def _parse_search_candidate_gemini_payload(raw_text: str) -> list[dict[str, Any]]:
+    text = _normalize_text(raw_text)
+    if not text:
+        return []
+    if "```" in text:
+        text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
+
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            payload = parsed
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {}
+
+    attractions = payload.get("attractions", []) if isinstance(payload.get("attractions"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for item in attractions:
+        if not isinstance(item, dict):
+            continue
+        source_index = item.get("source_index")
+        normalized.append(
+            {
+                "name": _normalize_text(item.get("name")),
+                "description": _normalize_text(item.get("description")),
+                "source_index": source_index if isinstance(source_index, int) else -1,
+            }
+        )
+    return normalized
+
+
+def _extract_search_candidates_with_gemini(
+    place: str,
+    query: str,
+    organic_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    api_key = _resolve_gemini_api_key()
+    if not api_key or not organic_results:
+        return []
+
+    search_result_contexts: list[dict[str, str]] = []
+    for item in organic_results[:8]:
+        if not isinstance(item, dict):
+            continue
+        link = _normalize_text(item.get("link"))
+        page_text = _truncate_recommendation_page_text(_fetch_url_text(link)) if link else ""
+        search_result_contexts.append(
+            {
+                "title": _normalize_text(item.get("title")),
+                "snippet": _normalize_text(item.get("snippet")),
+                "link": link,
+                "page_text": page_text,
+            }
+        )
+
+    payload = {
+        "city": place,
+        "query": _normalize_text(query),
+        "results": [
+            {
+                "source_index": index,
+                "title": context["title"],
+                "snippet": context["snippet"],
+                "link": context["link"],
+                "page_text": context["page_text"],
+            }
+            for index, context in enumerate(search_result_contexts)
+        ],
+    }
+    if not payload["results"]:
+        return []
+
+    prompt = (
+        "You extract actual attraction entities from search results for a travel recommendation system. "
+        "Use ONLY the provided titles/snippets/links/page_text. Never invent attraction names. "
+        "If a result is a list article, extract the specific attraction names explicitly mentioned in that result's snippet or page_text. "
+        "Ignore generic article titles that do not clearly mention a real attraction. "
+        "Prefer grounding entities in page_text when available. "
+        "Descriptions must be short summaries based only on the source snippet/page_text. "
+        "Return JSON only in shape: "
+        '{"attractions":[{"name":"","description":"","source_index":0}]}.'
+    )
+
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key, temperature=0)
+        response = llm.invoke(f"{prompt}\nINPUT:\n{json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        _debug_log("search_candidate_gemini_call_failed=True")
+        return []
+
+    raw = _normalize_text(getattr(response, "content", ""))
+    _debug_log(f"search_candidate_gemini_raw={raw[:500]}")
+    parsed = _parse_search_candidate_gemini_payload(raw)
+
+    extracted: list[dict[str, Any]] = []
+    for item in parsed:
+        name = _clean_recommendation_candidate_name(item.get("name", ""))
+        if not name or not _is_plausible_attraction_name(name):
+            continue
+        source_index = item.get("source_index", -1)
+        source_context = search_result_contexts[source_index] if isinstance(source_index, int) and 0 <= source_index < len(search_result_contexts) else {}
+        title = _normalize_text(source_context.get("title")) if isinstance(source_context, dict) else ""
+        snippet = _normalize_text(source_context.get("snippet")) if isinstance(source_context, dict) else ""
+        page_text = _normalize_text(source_context.get("page_text")) if isinstance(source_context, dict) else ""
+        if not _candidate_name_grounded_in_source(name, title, snippet, page_text=page_text):
+            continue
+        link = _normalize_text(source_context.get("link")) if isinstance(source_context, dict) else ""
+        candidate = {
+            "name": name,
+            "description": "" if _has_placeholder_description(_normalize_text(item.get("description"))) else _normalize_text(item.get("description")),
+            "image": "",
+            "ticket_price": "",
+            "sources": [link] if link else [],
+            "source_type": "search_entity",
+            "source_title": title,
+            "source_snippet": snippet,
+            "page_text": page_text,
+        }
+        if not _description_is_usable_for_recommendation(_normalize_text(candidate.get("description"))):
+            candidate["description"] = _pick_recommendation_description(name, snippet, page_text)
+        if not _is_valid_recommendation_entity(candidate, place):
+            continue
+        extracted.append(
+            candidate
+        )
+    return extracted
 
 
 def normalize_recommendations_with_gemini(
@@ -1530,7 +2663,7 @@ def normalize_recommendations_with_gemini(
     for item in parsed:
         name = _normalize_text(item.get("name"))
         base = by_name.get(name.lower())
-        if not name or not base:
+        if not name or not base or not _is_plausible_attraction_name(name):
             continue
 
         final_image = _normalize_text(item.get("image"))
@@ -1543,10 +2676,15 @@ def normalize_recommendations_with_gemini(
         if final_ticket and not _is_valid_ticket_price_output(final_ticket):
             final_ticket = ""
 
+        final_description = _normalize_text(item.get("description")) or _normalize_text(base.get("description"))
+        if _has_placeholder_description(final_description):
+            base_description = _normalize_text(base.get("description"))
+            final_description = "" if _has_placeholder_description(base_description) else base_description
+
         normalized.append(
             {
                 "name": name,
-                "description": _normalize_text(item.get("description")) or _normalize_text(base.get("description")),
+                "description": final_description,
                 "image": final_image,
                 "ticket_price": final_ticket,
                 "sources": base.get("sources", []) if isinstance(base.get("sources"), list) else [],
@@ -1557,16 +2695,238 @@ def normalize_recommendations_with_gemini(
     return normalized or candidates
 
 
+def _build_place_search_queries(place: str) -> list[str]:
+    return [
+        f"{place} tourist attractions",
+        f"{place} best attractions",
+        f"{place} things to do",
+        f"{place} landmarks",
+        f"{place} 景点",
+    ]
+
+
+def _collect_search_recommendation_candidates(
+    place: str,
+    api_key: str,
+    seen_names: set[str],
+    query_hint: str = "",
+    limit: int = 14,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    search_queries = _build_place_search_queries(place)
+    if query_hint:
+        search_queries.insert(0, query_hint)
+
+    for query in search_queries:
+        try:
+            payload = _search_google(query, api_key)
+        except Exception:
+            continue
+
+        organic_results = payload.get("organic_results", [])[:10]
+        gemini_candidates = _extract_search_candidates_with_gemini(place=place, query=query, organic_results=organic_results)
+        for candidate in gemini_candidates:
+            name_key = _normalize_text(candidate.get("name")).lower()
+            if not name_key or name_key in seen_names or not _is_valid_recommendation_entity(candidate, place):
+                continue
+            seen_names.add(name_key)
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+        if gemini_candidates:
+            continue
+
+        for item in organic_results:
+            title = _normalize_text(item.get("title"))
+            link = _normalize_text(item.get("link"))
+            snippet = _normalize_text(item.get("snippet"))
+            page_text = _truncate_recommendation_page_text(_fetch_url_text(link)) if link else ""
+            name = _clean_recommendation_candidate_name(re.split(r"\s[-|–]\s", title)[0].strip() if title else "")
+            if not _is_plausible_attraction_name(name) or _looks_like_generic_destination_candidate(name, place):
+                continue
+
+            name_key = name.lower()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+
+            candidate = {
+                "name": name,
+                "description": _pick_recommendation_description(name, snippet, page_text),
+                "image": "",
+                "ticket_price": "",
+                "sources": [link] if link else [],
+                "source_type": "serpapi",
+                "source_title": title,
+                "source_snippet": snippet,
+                "page_text": page_text,
+            }
+            if not _is_valid_recommendation_entity(candidate, place):
+                continue
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _search_wikipedia_titles(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    params = urllib.parse.urlencode(
+        {
+            "action": "query",
+            "list": "search",
+            "format": "json",
+            "utf8": 1,
+            "srsearch": query,
+            "srlimit": max(1, min(limit, 10)),
+        }
+    )
+    url = f"https://en.wikipedia.org/w/api.php?{params}"
+    data = _http_get_json(url, headers={"Accept": "application/json", "User-Agent": "ai-travel-assistant/1.0"})
+    if not isinstance(data, dict):
+        return []
+    query_payload = data.get("query", {})
+    results = query_payload.get("search", []) if isinstance(query_payload, dict) else []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def _collect_wikipedia_recommendation_candidates(
+    place: str,
+    seen_names: set[str],
+    query_hint: str = "",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    search_queries = []
+    if query_hint:
+        search_queries.append(query_hint)
+    search_queries.extend(
+        [
+            f"{place} landmarks",
+            f"{place} attractions",
+            f"{place} tourism",
+            f"{place} museums",
+            f"{place} historic sites",
+        ]
+    )
+
+    seen_titles: set[str] = set()
+    for query in search_queries:
+        for item in _search_wikipedia_titles(query, limit=8):
+            title = _normalize_text(item.get("title"))
+            title_key = title.lower()
+            if not title or title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+
+            name = _clean_recommendation_candidate_name(title)
+            if not _is_plausible_attraction_name(name):
+                continue
+            if _looks_like_generic_destination_candidate(name, place):
+                continue
+
+            lowered_name = name.lower()
+            if any(token in lowered_name for token in ["tourism in ", "list of ", "history of ", "transport in "]):
+                continue
+            if lowered_name in seen_names:
+                continue
+
+            summary = fetch_wikipedia_summary(name, location=place)
+            description = _normalize_text(summary.get("description"))
+            if _has_placeholder_description(description):
+                description = ""
+
+            candidate = {
+                "name": name,
+                "description": description,
+                "image": _normalize_text(summary.get("image_url")),
+                "ticket_price": "",
+                "sources": [_normalize_text(summary.get("source_url"))] if _normalize_text(summary.get("source_url")) else [],
+                "source_type": "wikipedia",
+            }
+            candidate["score"] = _recommendation_quality_score(candidate, place)
+            seen_names.add(lowered_name)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _collect_offline_catalog_recommendation_candidates(
+    place: str,
+    seen_names: set[str],
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    try:
+        from tools import TRAVEL_ATTRACTION_CATALOG
+    except Exception:
+        return []
+
+    place_key = _normalize_text(place).split(",", 1)[0].strip().lower()
+    catalog = TRAVEL_ATTRACTION_CATALOG.get(place_key, [])
+    if not isinstance(catalog, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for row in catalog:
+        if not isinstance(row, dict):
+            continue
+        name = _normalize_text(row.get("name"))
+        if not _is_plausible_attraction_name(name):
+            continue
+        if _looks_like_generic_destination_candidate(name, place):
+            continue
+        lowered_name = name.lower()
+        if lowered_name in seen_names:
+            continue
+        seen_names.add(lowered_name)
+
+        price_value = row.get("price", 0)
+        currency = _normalize_text(row.get("currency"))
+        ticket_price = "Free"
+        if isinstance(price_value, (int, float)) and float(price_value) > 0:
+            formatted_price = int(price_value) if float(price_value).is_integer() else round(float(price_value), 2)
+            ticket_price = f"{currency} {formatted_price}".strip()
+
+        candidate = {
+            "name": name,
+            "description": _normalize_text(row.get("information")),
+            "image": _normalize_text(row.get("image")),
+            "ticket_price": ticket_price,
+            "sources": [],
+            "source_type": "offline_catalog",
+        }
+        candidate["score"] = _recommendation_quality_score(candidate, place)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            return candidates
+    return candidates
+
+
 def get_attractions_by_place(place: str, query_type: str | None = None) -> list[dict[str, str]]:
     query_hint = _normalize_text(query_type)
-    place = _normalize_text(place)
+    place = _canonicalize_place_name(place)
     if not place:
         return []
 
-    osm_pois = _get_osm_city_pois(place, limit=14)
     candidates: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
+    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    if api_key:
+        candidates.extend(
+            _collect_search_recommendation_candidates(
+                place=place,
+                api_key=api_key,
+                seen_names=seen_names,
+                query_hint=query_hint,
+                limit=14,
+            )
+        )
+
+    osm_limit = 8 if api_key else 14
+    osm_pois = _get_osm_city_pois(place, limit=osm_limit)
     for poi in osm_pois:
         enriched = _enrich_poi_with_knowledge(poi, place)
         name = _normalize_text(enriched.get("name"))
@@ -1578,71 +2938,62 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
         seen_names.add(key)
         desc = _normalize_text(enriched.get("description"))
         sources = enriched.get("sources", []) if isinstance(enriched.get("sources"), list) else []
-        candidates.append(
-            {
-                "name": name,
-                "description": desc,
-                "image": _normalize_text(enriched.get("image")),
-                "ticket_price": _normalize_text(enriched.get("ticket_price")),
-                "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
-                "score": _recommendation_quality_score(enriched, place),
-            }
-        )
+        candidate = {
+            "name": name,
+            "description": desc,
+            "image": _normalize_text(enriched.get("image")),
+            "ticket_price": _normalize_text(enriched.get("ticket_price")),
+            "sources": [_normalize_text(s) for s in sources if _normalize_text(s)],
+            "source_type": "osm",
+            "wikipedia": _normalize_text(enriched.get("wikipedia")),
+            "wikidata": _normalize_text(enriched.get("wikidata")),
+            "website": _normalize_text(enriched.get("website")),
+        }
+        if not _is_valid_recommendation_entity(candidate, place):
+            continue
+        candidate["score"] = _recommendation_quality_score(candidate, place)
+        candidates.append(candidate)
         if len(candidates) >= 14:
             break
 
-    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
-    if api_key and len(candidates) < 10:
-        base_queries = [
-            f"{place} tourist attractions",
-            f"{place} best attractions",
-            f"{place} things to do",
-            f"{place} 景点",
-        ]
+    if len(candidates) < 4:
+        candidates.extend(
+            _collect_wikipedia_recommendation_candidates(
+                place=place,
+                seen_names=seen_names,
+                query_hint=query_hint,
+                limit=max(4, 12 - len(candidates)),
+            )
+        )
+    if len(candidates) < 4:
+        candidates.extend(
+            _collect_offline_catalog_recommendation_candidates(
+                place=place,
+                seen_names=seen_names,
+                limit=max(4, 12 - len(candidates)),
+            )
+        )
 
-        for query in base_queries:
-            try:
-                payload = _search_google(query, api_key)
-            except Exception:
-                continue
-
-            for item in payload.get("organic_results", [])[:10]:
-                title = _normalize_text(item.get("title"))
-                link = _normalize_text(item.get("link"))
-                snippet = _normalize_text(item.get("snippet"))
-
-                name = re.split(r"\s[-|–]\s", title)[0].strip() if title else ""
-                if not _is_plausible_attraction_name(name):
-                    continue
-
-                name_key = name.lower()
-                if name_key in seen_names:
-                    continue
-                seen_names.add(name_key)
-
-                candidates.append(
-                    {
-                        "name": name,
-                        "description": snippet,
-                        "image": "",
-                        "ticket_price": "",
-                        "sources": [link] if link else [],
-                        "score": 0,
-                    }
-                )
-                if len(candidates) >= 14:
-                    break
-
-    candidates = [c for c in candidates if _is_plausible_attraction_name(_normalize_text(c.get("name")))]
+    candidates = [
+        c
+        for c in candidates
+        if _is_valid_recommendation_entity(c, place)
+    ]
     candidates.sort(key=lambda c: int(c.get("score", 0)), reverse=True)
     normalized = normalize_recommendations_with_gemini(user_query=query_hint or place, city=place, candidates=candidates[:14])
     if not normalized:
         normalized = candidates[:12]
 
     final_items: list[dict[str, str]] = []
+    base_candidates_by_name = {
+        _normalize_text(candidate.get("name")).lower(): candidate
+        for candidate in candidates
+        if _normalize_text(candidate.get("name"))
+    }
     for item in normalized[:12]:
         name = _normalize_text(item.get("name"))
-        if not _is_plausible_attraction_name(name):
+        base_item = base_candidates_by_name.get(name.lower(), item)
+        if not _is_valid_recommendation_entity(base_item, place):
             continue
         desc = _normalize_text(item.get("description"))
         if _has_placeholder_description(desc):
@@ -1653,6 +3004,8 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
             {
                 "name": name,
                 "brief_description": desc,
+                "image": _normalize_text(item.get("image")),
+                "ticket_price": _normalize_text(item.get("ticket_price")),
                 "source_link": source_link,
             }
         )
@@ -1690,6 +3043,8 @@ def get_attraction_info(
     enrichment_mode: str = "detail",
 ) -> dict[str, Any]:
     attraction_name = attraction_name.strip()
+    attraction_aliases = _build_attraction_aliases(attraction_name)
+    lookup_name = _preferred_lookup_name(attraction_name, aliases=attraction_aliases)
     result: dict[str, Any] = {
         "query_type": "attraction_info",
         "name": attraction_name,
@@ -1698,8 +3053,10 @@ def get_attraction_info(
         "opening_hours": "",
         "visit_duration": "",
         "ticket_price": "",
+        "ticket_status": "unknown",
         "price_type": "unknown",
         "price_note": "Official price not found.",
+        "ticket_price_candidates": [],
         "sources": [],
     }
 
@@ -1716,7 +3073,7 @@ def get_attraction_info(
             return cached
 
     # OSM/Wikipedia/Wikidata first
-    poi = _search_osm_poi_by_name(attraction_name, location)
+    poi = _search_osm_poi_by_name(lookup_name, location)
     if poi:
         poi = _enrich_poi_with_knowledge(poi, location)
         result["name"] = _normalize_text(poi.get("name")) or attraction_name
@@ -1727,15 +3084,24 @@ def get_attraction_info(
         result["sources"] = poi.get("sources", []) if isinstance(poi.get("sources"), list) else []
 
     if not result["description"] or not result["image_url"]:
-        wiki_summary = fetch_wikipedia_summary(attraction_name=attraction_name, location=location)
-        if wiki_summary.get("description") and not result["description"]:
-            result["description"] = wiki_summary.get("description", "")
-        if wiki_summary.get("image_url") and not result["image_url"]:
-            result["image_url"] = wiki_summary.get("image_url", "")
-        if wiki_summary.get("source_url"):
-            result["sources"].append(wiki_summary["source_url"])
+        wiki_queries = [lookup_name, attraction_name, *[alias for alias in attraction_aliases if re.search(r"[A-Za-z]", alias)]]
+        seen_wiki_queries: set[str] = set()
+        for wiki_query in wiki_queries:
+            normalized_query = _normalize_text(wiki_query)
+            if not normalized_query or normalized_query.lower() in seen_wiki_queries:
+                continue
+            seen_wiki_queries.add(normalized_query.lower())
+            wiki_summary = fetch_wikipedia_summary(attraction_name=normalized_query, location=location)
+            if wiki_summary.get("description") and not result["description"]:
+                result["description"] = wiki_summary.get("description", "")
+            if wiki_summary.get("image_url") and not result["image_url"]:
+                result["image_url"] = wiki_summary.get("image_url", "")
+            if wiki_summary.get("source_url"):
+                result["sources"].append(wiki_summary["source_url"])
+            if result["description"] and result["image_url"]:
+                break
 
-    nominatim_result = fetch_nominatim_place(attraction_name=attraction_name, location=location)
+    nominatim_result = fetch_nominatim_place(attraction_name=lookup_name, location=location)
     if nominatim_result.get("osm_url"):
         result["sources"].append(nominatim_result["osm_url"])
 
@@ -1747,10 +3113,10 @@ def get_attraction_info(
     if api_key:
         location_suffix = f" {location}" if location else ""
         queries = [
-            f"{attraction_name}{location_suffix} official ticket",
-            f"{attraction_name}{location_suffix} admission fee",
-            f"{attraction_name}{location_suffix} opening hours",
-            f"{attraction_name}{location_suffix} official website",
+            f"{lookup_name}{location_suffix} official ticket",
+            f"{lookup_name}{location_suffix} admission fee",
+            f"{lookup_name}{location_suffix} opening hours",
+            f"{lookup_name}{location_suffix} official website",
         ]
 
         text_blobs: list[str] = []
@@ -1770,7 +3136,17 @@ def get_attraction_info(
                 text_blobs.append(_normalize_text(item.get("title")))
                 text_blobs.append(_normalize_text(item.get("snippet")))
 
-        preferred_sources = collect_preferred_sources(all_organic, min_count=3)
+        preferred_sources = collect_preferred_sources(
+            all_organic,
+            min_count=3,
+            attraction_name=attraction_name,
+            aliases=attraction_aliases,
+        )
+        result["ticket_price_candidates"] = build_ticket_price_candidate_pool(
+            sources=preferred_sources,
+            attraction_name=lookup_name,
+            aliases=attraction_aliases,
+        )[:20]
         opening_hour_text_blobs: list[str] = []
         for src in preferred_sources:
             title = _normalize_text(src.get("title"))
@@ -1795,45 +3171,86 @@ def get_attraction_info(
             )
             _debug_log(f"opening_hours_selected={result['opening_hours']}")
         if not result["ticket_price"]:
-            has_strong_ticket_sources = _has_strong_ticket_source_evidence(preferred_sources)
-            if enrichment_mode == "recommendation" and not has_strong_ticket_sources:
+            has_strong_ticket_sources = _has_strong_ticket_source_evidence(
+                preferred_sources,
+                attraction_name=attraction_name,
+                aliases=attraction_aliases,
+            )
+            if not preferred_sources:
+                result["ticket_price"] = ""
+                result["price_type"] = "unknown"
+                result["price_note"] = "No attraction-specific ticket source found."
+            elif enrichment_mode == "recommendation" and not has_strong_ticket_sources:
                 _debug_log("ticket_price_enrichment=skipped_due_to_weak_sources")
                 result["ticket_price"] = ""
                 result["price_type"] = "unknown"
                 result["price_note"] = "Skipped in recommendation mode due to weak ticket sources."
             else:
                 _debug_log("ticket_price_enrichment=attempted_due_to_strong_ticket_sources")
-                strong_price = resolve_ticket_price_from_sources(preferred_sources, attraction_name=attraction_name)
+                strong_price = resolve_ticket_price_from_sources(
+                    preferred_sources,
+                    attraction_name=attraction_name,
+                    aliases=attraction_aliases,
+                )
                 _debug_log(f"rule_based_price={strong_price}")
                 gemini_price = resolve_ticket_price_with_gemini(
-                    attraction_name=attraction_name,
+                    attraction_name=lookup_name,
                     location=location,
                     sources=preferred_sources,
                     rule_based_price=strong_price,
+                    aliases=attraction_aliases,
                 )
                 gemini_ticket_price = _normalize_text(gemini_price.get("ticket_price"))
                 if gemini_ticket_price:
                     result["ticket_price"] = gemini_ticket_price
+                    result["ticket_status"] = "free" if gemini_ticket_price == "Free" else "paid"
                     result["price_type"] = _normalize_text(gemini_price.get("price_type")) or ("range" if "–" in gemini_ticket_price else "official")
                     result["price_note"] = _normalize_text(gemini_price.get("price_note")) or "Gemini-assisted ticket price resolution"
                     _debug_log("ticket_price_path=gemini")
                 elif strong_price:
                     result["ticket_price"] = strong_price
+                    result["ticket_status"] = "free" if strong_price == "Free" else "paid"
                     result["price_type"] = "exact" if "–" not in strong_price else "range"
-                    result["price_note"] = "Parsed from ticket-related source content"
+                    candidate_count = len(result.get("ticket_price_candidates") or [])
+                    result["price_note"] = f"Parsed from ticket-related source content ({candidate_count} candidates reviewed)"
                     _debug_log("ticket_price_path=rule_based_fallback")
                 else:
-                    price_candidates = _collect_price_candidates_from_sources(preferred_sources)
+                    price_candidates = result.get("ticket_price_candidates") or _collect_price_candidates_from_sources(
+                        preferred_sources,
+                        attraction_name=attraction_name,
+                        aliases=attraction_aliases,
+                    )
                     _debug_log(f"fallback_price_candidates={json.dumps(price_candidates, ensure_ascii=False)}")
                     price_resolution = resolve_ticket_price(price_candidates)
                     result["ticket_price"] = _normalize_text(price_resolution.get("ticket_price"))
+                    if result["ticket_price"]:
+                        result["ticket_status"] = "free" if result["ticket_price"] == "Free" else "paid"
                     result["price_type"] = _normalize_text(price_resolution.get("price_type")) or "unknown"
                     result["price_note"] = _normalize_text(price_resolution.get("price_note")) or "Official price not found."
                     _debug_log("ticket_price_path=legacy_fallback")
 
+        if preferred_sources and (not result["opening_hours"] or not result["ticket_price"]):
+            reasoned = analyze_visit_reasonableness_with_gemini(
+                attraction_name=lookup_name,
+                location=location,
+                sources=preferred_sources,
+                current_opening_hours=_normalize_text(result.get("opening_hours")),
+                current_ticket_price=_normalize_text(result.get("ticket_price")),
+                aliases=attraction_aliases,
+            )
+            if not result["opening_hours"] and _normalize_text(reasoned.get("opening_hours")):
+                result["opening_hours"] = _normalize_text(reasoned.get("opening_hours"))
+            if not result["ticket_price"] and _normalize_text(reasoned.get("ticket_price")):
+                result["ticket_price"] = _normalize_text(reasoned.get("ticket_price"))
+            reasoned_status = _normalize_text(reasoned.get("ticket_status")).lower()
+            if reasoned_status in {"free", "paid", "partially_paid"}:
+                result["ticket_status"] = reasoned_status
+            if _normalize_text(reasoned.get("price_note")):
+                result["price_note"] = _normalize_text(reasoned.get("price_note"))
+
         if not result["image_url"]:
             try:
-                image_data = _search_google_images(f"{attraction_name}{location_suffix}", api_key)
+                image_data = _search_google_images(f"{lookup_name}{location_suffix}", api_key)
             except Exception:
                 image_data = {}
             result["image_url"] = _pick_image_url(all_organic, image_data)
@@ -1854,6 +3271,12 @@ def get_attraction_info(
             pass
         else:
             result["ticket_price"] = ""
+    if result["ticket_price"] == "Free":
+        result["ticket_status"] = "free"
+    elif not result["ticket_price"] and result.get("ticket_status") == "paid":
+        result["ticket_status"] = "unknown"
+    if result["name"] == attraction_name and lookup_name != attraction_name and (result["description"] or result["sources"]):
+        result["name"] = lookup_name
 
     deduped_sources: list[str] = []
     seen: set[str] = set()
