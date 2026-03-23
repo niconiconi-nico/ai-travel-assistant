@@ -20,62 +20,22 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from attraction_tool import (  # noqa: E402
+    CITY_ATTRACTION_SEEDS,
     clean_opening_hours,
     get_attraction_info,
     get_attractions_by_place,
     is_valid_opening_hours,
+    normalize_visit_duration,
 )
 
 
 _CITY_RECOMMENDATION_SEEDS: dict[str, list[str]] = {
-    "beijing": [
-        "Forbidden City",
-        "Temple of Heaven",
-        "Summer Palace",
-        "Mutianyu Great Wall",
-    ],
-    "北京": [
-        "Forbidden City",
-        "Temple of Heaven",
-        "Summer Palace",
-        "Mutianyu Great Wall",
-    ],
-    "kuala lumpur, malaysia": [
-        "Petronas Twin Towers",
-        "KL Tower",
-        "Batu Caves",
-        "Central Market",
-    ],
-    "pattaya": [
-        "The Sanctuary of Truth",
-        "Pattaya Floating Market",
-        "Big Buddha Temple",
-        "Nong Nooch Tropical Garden",
-    ],
-    "bangkok": [
-        "The Grand Palace",
-        "Wat Pho",
-        "Wat Arun",
-        "Chatuchak Weekend Market",
-    ],
-    "shanghai": [
-        "The Bund",
-        "Oriental Pearl Tower",
-        "Yu Garden",
-        "Shanghai Tower",
-    ],
-    "上海": [
-        "The Bund",
-        "Oriental Pearl Tower",
-        "Yu Garden",
-        "Shanghai Tower",
-    ],
-    "penang, malaysia": [
-        "Penang Hill",
-        "Chew Jetty",
-        "Kek Lok Si Temple",
-        "Armenian Street",
-    ],
+    **CITY_ATTRACTION_SEEDS,
+    "北京": CITY_ATTRACTION_SEEDS["beijing"],
+    "上海": CITY_ATTRACTION_SEEDS["shanghai"],
+    "kuala lumpur, malaysia": CITY_ATTRACTION_SEEDS["kuala lumpur"],
+    "penang, malaysia": CITY_ATTRACTION_SEEDS["penang"],
+    "george town, penang, malaysia": CITY_ATTRACTION_SEEDS["george town"],
 }
 
 _CITY_NAME_ALIASES: dict[str, str] = {
@@ -300,14 +260,19 @@ def _seed_recommendation_candidates(city: str, candidates: list[dict[str, Any]])
     seeded = [dict(item) for item in candidates if isinstance(item, dict)]
     existing = {str(item.get("name", "")).strip().lower() for item in seeded if isinstance(item, dict)}
 
-    if len(seeded) < 2 and ("george town" in city.lower() or "penang" in city.lower()):
-        for seed in ["Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"]:
-            if seed.lower() not in existing:
-                seeded.append({"name": seed, "brief_description": "", "source_link": ""})
-                existing.add(seed.lower())
-
+    strong_candidates = sum(
+        1
+        for item in seeded[:5]
+        if _clean_candidate_name(item.get("name", ""))
+        and (
+            _compact_description(item.get("description") or item.get("brief_description"))
+            or str(item.get("image") or item.get("image_url") or "").strip()
+            or _clean_ticket_price(item.get("ticket_price"))
+        )
+    )
+    needs_seed_fallback = len(seeded) < 5 or strong_candidates < 3
     city_seed_names = _CITY_RECOMMENDATION_SEEDS.get(city.lower(), []) or _CITY_RECOMMENDATION_SEEDS.get(city, [])
-    if len(seeded) < 2 and city_seed_names:
+    if needs_seed_fallback and city_seed_names:
         for seed in city_seed_names:
             if seed.lower() not in existing:
                 seeded.append({"name": seed, "brief_description": "", "source_link": ""})
@@ -353,10 +318,17 @@ def _enrich_recommendation_candidates(city: str, candidates: list[dict[str, Any]
         candidate = dict(item)
         if index < 5 and _needs_recommendation_enrichment(candidate):
             try:
-                detail = get_attraction_info(
-                    attraction_name=str(candidate.get("name", "")).strip(),
-                    location=city or None,
-                )
+                try:
+                    detail = get_attraction_info(
+                        attraction_name=str(candidate.get("name", "")).strip(),
+                        location=city or None,
+                        enrichment_mode="recommendation",
+                    )
+                except TypeError:
+                    detail = get_attraction_info(
+                        attraction_name=str(candidate.get("name", "")).strip(),
+                        location=city or None,
+                    )
             except Exception:
                 detail = {}
             if isinstance(detail, dict):
@@ -561,7 +533,11 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
     description = _compact_description(payload.get("description"))
     image = str(payload.get("image") or payload.get("image_url") or "").strip()
     opening_hours = _normalize_opening_hours(payload.get("opening_hours"))
-    visit_duration = str(payload.get("visit_duration") or "").strip()
+    visit_duration = normalize_visit_duration(
+        payload.get("visit_duration"),
+        attraction_name=str(payload.get("name", "")).strip(),
+        context_text=description,
+    )
     ticket_price = _clean_ticket_price(payload.get("ticket_price"))
     ticket_status = str(payload.get("ticket_status") or "").strip().lower() or ("free" if ticket_price == "Free" else "unknown")
     price_note = str(payload.get("price_note") or "").strip()
@@ -578,6 +554,36 @@ def _normalize_info(payload: dict[str, Any]) -> dict[str, Any]:
         "price_note": price_note,
         "sources": sources,
     }
+
+
+def _recommendation_response_is_usable(payload: dict[str, Any], city: str = "") -> bool:
+    attractions = payload.get("attractions", [])
+    if not isinstance(attractions, list) or len(attractions) < 3:
+        return False
+
+    strong_items = 0
+    for item in attractions[:6]:
+        if not isinstance(item, dict):
+            continue
+        if not _clean_candidate_name(item.get("name", "")):
+            continue
+        description = _compact_description(item.get("description"))
+        image = str(item.get("image") or item.get("image_url") or "").strip()
+        ticket_price = _clean_ticket_price(item.get("ticket_price"))
+        if description or image or ticket_price:
+            strong_items += 1
+    return strong_items >= 3
+
+
+def _info_response_is_usable(payload: dict[str, Any]) -> bool:
+    if not str(payload.get("name", "")).strip():
+        return False
+    if not str(payload.get("visit_duration", "")).strip():
+        return False
+    return any(
+        str(payload.get(key, "")).strip()
+        for key in ("description", "image", "image_url", "opening_hours", "ticket_price")
+    )
 
 
 def _is_placeholder_api_key(value: str) -> bool:
@@ -671,7 +677,7 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
     if query_type == "attraction_recommendation":
         city = _normalize_city(payload.get("city") or query)
         normalized = _normalize_recommendation(payload)
-        if len(normalized.get("attractions", [])) >= 1:
+        if _recommendation_response_is_usable(normalized, city=city):
             return normalized
         if city:
             return _build_recommendation_from_city(city=city, query=query)
@@ -679,15 +685,15 @@ def run_attraction_agent(query: str) -> dict[str, Any]:
 
     if query_type == "attraction_info":
         normalized_info = _normalize_info(payload)
-        if normalized_info.get("name"):
+        if _info_response_is_usable(normalized_info):
             return normalized_info
         return _build_detail_from_query(query)
 
     if "attractions" in payload or "city" in payload:
         normalized = _normalize_recommendation(payload)
-        if len(normalized.get("attractions", [])) >= 1:
-            return normalized
         city = _normalize_city(payload.get("city") or query)
+        if _recommendation_response_is_usable(normalized, city=city):
+            return normalized
         if city:
             return _build_recommendation_from_city(city=city, query=query)
         return normalized

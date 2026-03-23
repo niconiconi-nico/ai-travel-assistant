@@ -1,0 +1,46 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attraction Demo",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/app/agents/attraction_demo.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Main Agent (interactive)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/app/agents/main_agent.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Attraction Agent CLI",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/app/agents/attraction_agent.py",
+      "args": [
+        "${input:attractionQuery}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "attractionQuery",
+      "type": "promptString",
+      "description": "输入景点查询，例如：Top attractions in Tokyo 或 Tokyo Tower ticket price",
+      "default": "Top attractions in Tokyo"
+    }
+  ]
+}
