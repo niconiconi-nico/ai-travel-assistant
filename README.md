@@ -264,7 +264,29 @@ SERPAPI_API_KEY=your_serpapi_key
 python app/agents/attraction_demo.py
 ```
 
-### 5) 与 Agent 集成
+### 5) 使用 VS Code Debug 直接启动
+仓库已提供 `.vscode/launch.json`，推荐直接在 VS Code 的 **Run and Debug** 中选择以下配置启动：
+
+- `Attraction Demo`
+- `Main Agent (interactive)`
+- `Attraction Agent CLI`
+
+它们都会自动：
+- 以项目根目录作为 `cwd`
+- 读取 `${workspaceFolder}/.env`
+- 在集成终端中运行，方便输入交互内容
+
+建议先从 `.env.example` 复制一份：
+
+```bash
+cp .env.example .env
+```
+
+然后补齐你自己的 key。
+
+> `ATTRACTION_TOOL_DEBUG=true` 只是打开景点工具的调试日志，不会替代上述启动入口。
+
+### 6) 与 Agent 集成
 `app/agents/main_agent.py` 已注册 `attraction_information_tool`，Agent 在生成 itinerary 时可调用该工具补充：
 - 营业时间
 - 建议游玩时长
