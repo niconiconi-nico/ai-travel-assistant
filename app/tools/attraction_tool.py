@@ -114,62 +114,80 @@ _ATTRACTION_ALIAS_OVERRIDES: dict[str, list[str]] = {
     "badaling great wall": ["长城", "八达岭长城", "badaling"],
     "beijing ancient observatory": ["北京古观象台", "古观象台", "ancient observatory"],
     "北京古观象台": ["beijing ancient observatory", "古观象台", "ancient observatory"],
+    "the sanctuary of truth": ["sanctuary of truth"],
+    "sanctuary of truth": ["the sanctuary of truth"],
 }
 
-_CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {
+CITY_ATTRACTION_SEEDS: dict[str, list[str]] = {
+    "bangkok": [
+        "The Grand Palace",
+        "Wat Pho",
+        "Wat Arun",
+        "Chatuchak Weekend Market",
+        "Jim Thompson House Museum",
+    ],
     "beijing": [
-        "forbidden city",
-        "the palace museum",
-        "temple of heaven",
-        "summer palace",
-        "mutianyu great wall",
-        "badaling great wall",
-        "great wall",
-        "故宫",
-        "故宫博物院",
-        "天坛",
-        "颐和园",
-        "长城",
+        "Forbidden City",
+        "Temple of Heaven",
+        "Summer Palace",
+        "Mutianyu Great Wall",
+        "Tiananmen Square",
+        "Beihai Park",
+        "Lama Temple",
+    ],
+    "george town": [
+        "Chew Jetty",
+        "Armenian Street",
+        "Khoo Kongsi",
+        "Penang Street Art",
+        "Pinang Peranakan Mansion",
     ],
     "kuala lumpur": [
-        "petronas twin towers",
-        "petronas towers",
-        "kl tower",
-        "batu caves",
-        "central market",
-        "双子塔",
-        "吉隆坡双子塔",
+        "Petronas Twin Towers",
+        "Batu Caves",
+        "KL Tower",
+        "Central Market",
+        "Merdeka Square",
+        "Bukit Bintang",
+    ],
+    "london": [
+        "British Museum",
+        "Tower of London",
+        "Buckingham Palace",
+        "London Eye",
+        "Big Ben",
     ],
     "pattaya": [
-        "the sanctuary of truth",
-        "sanctuary of truth",
-        "pattaya floating market",
-        "big buddha temple",
-        "nong nooch tropical garden",
-    ],
-    "bangkok": [
-        "the grand palace",
-        "wat pho",
-        "wat arun",
-        "chatuchak weekend market",
-    ],
-    "shanghai": [
-        "the bund",
-        "oriental pearl tower",
-        "yu garden",
-        "shanghai tower",
-        "外滩",
-        "东方明珠",
-        "豫园",
-        "上海中心大厦",
+        "The Sanctuary of Truth",
+        "Pattaya Floating Market",
+        "Big Buddha Temple",
+        "Nong Nooch Tropical Garden",
+        "Art in Paradise Pattaya",
     ],
     "penang": [
-        "penang hill",
-        "chew jetty",
-        "kek lok si temple",
-        "armenian street",
-    ]
+        "Penang Hill",
+        "Chew Jetty",
+        "Kek Lok Si Temple",
+        "Armenian Street",
+        "Penang Street Art",
+    ],
+    "shanghai": [
+        "The Bund",
+        "Oriental Pearl Tower",
+        "Yu Garden",
+        "Shanghai Tower",
+        "Shanghai Museum",
+    ],
+    "tokyo": [
+        "Sensō-ji",
+        "Tokyo Tower",
+        "Shibuya Scramble Crossing",
+        "Meiji Shrine",
+        "Tokyo Skytree",
+    ],
 }
+
+_CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {}
 
 _CITY_PLACE_ALIASES: dict[str, str] = {
     "北京": "Beijing",
@@ -227,6 +245,18 @@ def _build_attraction_aliases(attraction_name: str, aliases: list[str] | None = 
             seen.add(item)
             deduped.append(item)
     return deduped
+
+
+_CITY_ICONIC_ATTRACTIONS = {
+    city: sorted(
+        {
+            alias
+            for seed in seed_names
+            for alias in _build_attraction_aliases(seed)
+        }
+    )
+    for city, seed_names in CITY_ATTRACTION_SEEDS.items()
+}
 
 
 def _preferred_lookup_name(attraction_name: str, aliases: list[str] | None = None) -> str:
@@ -534,6 +564,88 @@ def estimate_visit_duration(attraction_name: str, context_text: str = "") -> str
         "generic": "2 hours (estimated)",
     }
     return estimates.get(attraction_type, estimates["generic"])
+
+
+def _is_valid_visit_duration_output(value: Any) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    if len(text) > 80:
+        return False
+    if re.search(r"https?://|[?&](?:q|ved|sa)=|<[^>]+>|[{}[\]\"]", text, re.IGNORECASE):
+        return False
+    if re.search(r"\b20\d{2}\b", text) and not re.search(r"\b20\d{2}\s*minutes?\b", text, re.IGNORECASE):
+        return False
+
+    normalized = " ".join(text.split())
+    if "(estimated)" in normalized.lower():
+        estimated_base = normalized[: normalized.lower().find("(estimated)")].strip(" -–~")
+        return _is_valid_visit_duration_output(estimated_base)
+
+    patterns = [
+        r"^\d+(?:\.\d+)?\s*(?:-|–|to|~)\s*\d+(?:\.\d+)?\s*(?:hours?|hrs?|小时)$",
+        r"^\d+(?:\.\d+)?\s*(?:hours?|hrs?|小时)$",
+        r"^\d+\s*(?:-|–|to|~)\s*\d+\s*(?:minutes?|mins?|分钟)$",
+        r"^\d+\s*(?:minutes?|mins?|分钟)$",
+    ]
+    return any(re.fullmatch(pattern, normalized, re.IGNORECASE) for pattern in patterns)
+
+
+def _format_duration_number(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def normalize_visit_duration(value: Any, attraction_name: str = "", context_text: str = "") -> str:
+    raw = _normalize_text(value)
+    fallback = estimate_visit_duration(attraction_name, context_text)
+    if not raw:
+        return fallback
+
+    cleaned = re.sub(r"https?://\S+", " ", raw)
+    cleaned = re.sub(r"[?&](?:q|ved|sa|usg|ei|oq|aqs)=[^\s]+", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("\n", " ")
+    cleaned = re.sub(
+        r"(recommended\s*time|how\s*long\s*to\s*spend|visit\s*duration|suggested\s*duration|建议游玩时长|建議遊玩時長)[:：-]?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = " ".join(cleaned.split()).strip(" -|,.;。")
+    estimated_suffix = " (estimated)" if "estimated" in raw.lower() else ""
+
+    range_patterns = [
+        (r"(\d+(?:\.\d+)?)\s*(?:-|–|to|~)\s*(\d+(?:\.\d+)?)\s*(hours?|hrs?|小时)", "hours"),
+        (r"(\d+)\s*(?:-|–|to|~)\s*(\d+)\s*(minutes?|mins?|分钟)", "minutes"),
+    ]
+    for pattern, unit in range_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if not match:
+            continue
+        start = float(match.group(1))
+        end = float(match.group(2))
+        normalized = f"{_format_duration_number(start)}-{_format_duration_number(end)} {unit}"
+        if _is_valid_visit_duration_output(normalized):
+            return f"{normalized}{estimated_suffix}".strip()
+
+    single_patterns = [
+        (r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|小时)", "hour", "hours"),
+        (r"(\d+)\s*(minutes?|mins?|分钟)", "minute", "minutes"),
+    ]
+    for pattern, singular, plural in single_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if not match:
+            continue
+        amount = float(match.group(1))
+        unit = singular if amount == 1 else plural
+        normalized = f"{_format_duration_number(amount)} {unit}"
+        if _is_valid_visit_duration_output(normalized):
+            return f"{normalized}{estimated_suffix}".strip()
+
+    if _is_valid_visit_duration_output(cleaned):
+        return cleaned
+    return fallback
 
 
 def _extract_numbers(value: str) -> list[float]:
@@ -907,8 +1019,129 @@ def extract_visit_duration(text: str, attraction_name: str = "") -> str:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return match.group(0).strip()
-    return estimate_visit_duration(attraction_name, text)
+            return normalize_visit_duration(match.group(0), attraction_name=attraction_name, context_text=text)
+    return normalize_visit_duration("", attraction_name=attraction_name, context_text=text)
+
+
+def _seed_city_key(place: str) -> str:
+    canonical_place = _canonicalize_place_name(place)
+    lowered = _normalize_text(canonical_place).lower()
+    if "george town" in lowered:
+        return "george town"
+    return lowered.split(",", 1)[0].strip()
+
+
+def _get_city_seed_names(place: str) -> list[str]:
+    city_key = _seed_city_key(place)
+    seed_names = list(CITY_ATTRACTION_SEEDS.get(city_key, []))
+    if city_key == "george town":
+        seed_names.extend(CITY_ATTRACTION_SEEDS.get("penang", []))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for seed in seed_names:
+        normalized = _normalize_text(seed)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+def _build_seed_candidate(place: str, attraction_name: str) -> dict[str, Any]:
+    description = ""
+    image = ""
+    ticket_price = ""
+
+    try:
+        from tools import TRAVEL_ATTRACTION_CATALOG
+    except Exception:
+        TRAVEL_ATTRACTION_CATALOG = {}
+
+    if isinstance(TRAVEL_ATTRACTION_CATALOG, dict):
+        city_keys = [_seed_city_key(place)]
+        if city_keys[0] == "george town":
+            city_keys.append("penang")
+        for city_key in city_keys:
+            catalog_rows = TRAVEL_ATTRACTION_CATALOG.get(city_key, [])
+            for row in catalog_rows if isinstance(catalog_rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                row_name = _normalize_text(row.get("name"))
+                if _normalize_match_text(row_name) != _normalize_match_text(attraction_name):
+                    continue
+                description = _normalize_text(row.get("information"))
+                image = _normalize_text(row.get("image"))
+                price_value = row.get("price")
+                currency = _normalize_text(row.get("currency"))
+                if isinstance(price_value, (int, float)):
+                    if float(price_value) <= 0:
+                        ticket_price = "Free"
+                    elif currency:
+                        rendered_price = int(price_value) if float(price_value).is_integer() else round(float(price_value), 2)
+                        ticket_price = f"{currency} {rendered_price}".strip()
+                break
+            if description or image or ticket_price:
+                break
+
+    return {
+        "name": attraction_name,
+        "description": description,
+        "image": image,
+        "ticket_price": ticket_price,
+        "sources": [],
+        "source_type": "offline_seed",
+        "score": 0,
+    }
+
+
+def _recommendation_needs_seed_fallback(candidates: list[dict[str, Any]], place: str) -> bool:
+    valid_candidates = [candidate for candidate in candidates if _is_valid_recommendation_entity(candidate, place)]
+    if len(valid_candidates) < 5:
+        return True
+
+    ranked = sorted(valid_candidates, key=lambda item: int(item.get("score", 0)), reverse=True)
+    top_ranked = ranked[:5]
+    strong_candidates = sum(1 for item in top_ranked if int(item.get("score", 0)) >= 25)
+    iconic_candidates = sum(1 for item in top_ranked if _has_city_iconic_match(_normalize_text(item.get("name")), place))
+    descriptive_candidates = sum(
+        1
+        for item in top_ranked
+        if _description_is_usable_for_recommendation(_normalize_text(item.get("description")))
+    )
+    return strong_candidates < 3 or iconic_candidates == 0 or descriptive_candidates < 2
+
+
+def _inject_seed_recommendation_candidates(
+    place: str,
+    candidates: list[dict[str, Any]],
+    seen_names: set[str],
+) -> list[dict[str, Any]]:
+    if not _get_city_seed_names(place):
+        return candidates
+    if not _recommendation_needs_seed_fallback(candidates, place):
+        return candidates
+
+    injected = list(candidates)
+    existing_aliases = {
+        alias
+        for candidate in injected
+        for alias in _build_attraction_aliases(_normalize_text(candidate.get("name")))
+    }
+    for seed_name in _get_city_seed_names(place):
+        seed_key = seed_name.lower()
+        seed_aliases = set(_build_attraction_aliases(seed_name))
+        if seed_key in seen_names or (seed_aliases and seed_aliases & existing_aliases):
+            continue
+        seen_names.add(seed_key)
+        seed_candidate = _build_seed_candidate(place=place, attraction_name=seed_name)
+        seed_candidate["score"] = _recommendation_quality_score(seed_candidate, place)
+        injected.append(seed_candidate)
+        existing_aliases.update(seed_aliases)
+    return injected
 
 
 def _pick_image_url(results: list[dict[str, Any]], image_results: dict[str, Any]) -> str:
@@ -2327,7 +2560,7 @@ def _looks_like_generic_destination_candidate(name: str, city: str) -> bool:
         return True
     if _looks_like_generic_object_name(normalized_name):
         return True
-    if normalized_city and normalized_city in normalized_name and not _has_attraction_name_hint(normalized_name):
+    if normalized_city and normalized_city in normalized_name and not _has_attraction_name_hint(normalized_name) and not _has_city_iconic_match(normalized_name, city):
         return True
     return False
 
@@ -2418,8 +2651,8 @@ def _recommendation_quality_score(candidate: dict[str, Any], city: str) -> int:
         "official_attraction_page": 25,
         "wiki_entity": 20,
         "osm_poi": 15,
-        "offline_seed": 15,
-        "search_entity": 22,
+        "offline_seed": 6,
+        "search_entity": 28,
         "official_destination_page": -40,
         "ota_product_page": -25,
         "ota_destination_page": -25,
@@ -2974,6 +3207,8 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
             )
         )
 
+    candidates = _inject_seed_recommendation_candidates(place=place, candidates=candidates, seen_names=seen_names)
+
     candidates = [
         c
         for c in candidates
@@ -3009,6 +3244,26 @@ def get_attractions_by_place(place: str, query_type: str | None = None) -> list[
                 "source_link": source_link,
             }
         )
+    final_seen_names = {item["name"].lower() for item in final_items if _normalize_text(item.get("name"))}
+    if len(final_items) < 8:
+        for candidate in sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True):
+            name = _normalize_text(candidate.get("name"))
+            if not name or name.lower() in final_seen_names:
+                continue
+            final_seen_names.add(name.lower())
+            sources = candidate.get("sources", []) if isinstance(candidate.get("sources"), list) else []
+            desc = _normalize_text(candidate.get("description"))
+            final_items.append(
+                {
+                    "name": name,
+                    "brief_description": "" if _has_placeholder_description(desc) else desc,
+                    "image": _normalize_text(candidate.get("image")),
+                    "ticket_price": _normalize_text(candidate.get("ticket_price")),
+                    "source_link": _normalize_text(sources[0]) if sources else "",
+                }
+            )
+            if len(final_items) >= 12:
+                break
     return final_items
 
 
@@ -3028,10 +3283,17 @@ def _is_cache_entry_usable(entry: dict[str, Any]) -> bool:
         return False
     opening_hours = _normalize_text(entry.get("opening_hours"))
     ticket_price = _normalize_text(entry.get("ticket_price"))
+    visit_duration = _normalize_text(entry.get("visit_duration"))
+    name = _normalize_text(entry.get("name"))
+    description = _normalize_text(entry.get("description"))
 
     if opening_hours and not is_valid_opening_hours(opening_hours):
         return False
     if ticket_price and not _is_valid_ticket_price_output(ticket_price):
+        return False
+    if visit_duration and not _is_valid_visit_duration_output(
+        normalize_visit_duration(visit_duration, attraction_name=name, context_text=description)
+    ):
         return False
     return True
 
@@ -3163,6 +3425,9 @@ def get_attraction_info(
         merged_text = "\n".join(t for t in text_blobs if t)
         opening_merged_text = "\n".join(opening_hour_text_blobs)
 
+        if not result["visit_duration"]:
+            result["visit_duration"] = extract_visit_duration(merged_text, attraction_name=lookup_name)
+
         if not result["opening_hours"]:
             result["opening_hours"] = (
                 _extract_hours_from_sources(preferred_sources)
@@ -3264,6 +3529,11 @@ def get_attraction_info(
 
     if not result["visit_duration"]:
         result["visit_duration"] = estimate_visit_duration(attraction_name, result.get("description", ""))
+    result["visit_duration"] = normalize_visit_duration(
+        result.get("visit_duration"),
+        attraction_name=result.get("name") or attraction_name,
+        context_text=result.get("description", ""),
+    )
 
     result["opening_hours"] = _normalize_opening_hours_value(result.get("opening_hours", ""))
     if not _is_valid_ticket_price_output(result.get("ticket_price")):

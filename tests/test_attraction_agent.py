@@ -50,6 +50,8 @@ def test_build_recommendation_from_city_adds_requested_city_seeds(monkeypatch):
         "Kuala Lumpur, Malaysia": {"Petronas Twin Towers", "KL Tower", "Batu Caves", "Central Market"},
         "Pattaya": {"The Sanctuary of Truth", "Pattaya Floating Market", "Big Buddha Temple", "Nong Nooch Tropical Garden"},
         "Bangkok": {"The Grand Palace", "Wat Pho", "Wat Arun", "Chatuchak Weekend Market"},
+        "Tokyo": {"Sensō-ji", "Tokyo Tower", "Shibuya Scramble Crossing", "Meiji Shrine"},
+        "London": {"British Museum", "Tower of London", "Buckingham Palace", "London Eye"},
         "Shanghai": {"The Bund", "Oriental Pearl Tower", "Yu Garden", "Shanghai Tower"},
         "Penang, Malaysia": {"Penang Hill", "Chew Jetty", "Kek Lok Si Temple", "Armenian Street"},
     }
@@ -126,3 +128,20 @@ def test_normalize_info_preserves_ticket_status_and_price_note():
 
     assert normalized["ticket_status"] == "partially_paid"
     assert "skybridge" in normalized["price_note"].lower()
+
+
+def test_normalize_info_backfills_visit_duration_when_missing():
+    normalized = attraction_agent._normalize_info(
+        {
+            "name": "Tokyo Tower",
+            "description": "Observation tower in Tokyo.",
+            "image_url": "",
+            "opening_hours": "",
+            "visit_duration": "",
+            "ticket_price": "",
+            "sources": [],
+        }
+    )
+
+    assert normalized["visit_duration"]
+    assert "hour" in normalized["visit_duration"].lower()

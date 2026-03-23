@@ -1325,6 +1325,58 @@ def test_get_attractions_by_place_uses_offline_catalog_when_external_sources_fai
     assert result[0]["brief_description"]
 
 
+def test_get_attractions_by_place_injects_major_city_seeds_when_recall_is_thin(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=14: [])
+    monkeypatch.setattr(attraction_tool, "_search_wikipedia_titles", lambda query, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates[:2],
+    )
+
+    result = attraction_tool.get_attractions_by_place("London")
+
+    names = {item["name"] for item in result}
+    assert {"British Museum", "Tower of London", "Buckingham Palace", "London Eye"}.issubset(names)
+
+
+def test_get_attraction_info_extracts_and_normalizes_visit_duration(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
+    monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        attraction_tool,
+        "fetch_wikipedia_summary",
+        lambda attraction_name, location=None: {
+            "description": "Observation tower.",
+            "image_url": "",
+            "source_url": "",
+        },
+    )
+    monkeypatch.setattr(attraction_tool, "fetch_nominatim_place", lambda *args, **kwargs: {})
+
+    def fake_google_search(query: str, api_key: str, num: int = 10):
+        return {
+            "knowledge_graph": {},
+            "answer_box": {"answer": "Recommended time: 2 hours"},
+            "organic_results": [
+                {
+                    "title": "Official site",
+                    "link": "https://example.com/official",
+                    "snippet": "Opening hours 9:00 AM - 6:00 PM",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(attraction_tool, "_search_google", fake_google_search)
+    monkeypatch.setattr(attraction_tool, "_search_google_images", lambda *args, **kwargs: {"images_results": []})
+    monkeypatch.setattr(attraction_tool, "_CACHE_PATH", Path("/tmp/attraction_tool_test_cache_duration.json"))
+
+    result = attraction_tool.get_attraction_info("Demo Tower", "Demo City")
+
+    assert result["visit_duration"] == "2 hours"
+
+
 def test_parse_gemini_ticket_payload_converts_cny_to_rm():
     raw = """```json
 {"ticket_price":"成人20元/人","price_type":"official","price_note":"gov page"}
