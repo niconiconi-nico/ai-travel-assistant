@@ -50,6 +50,8 @@ def test_build_recommendation_from_city_adds_requested_city_seeds(monkeypatch):
         "Kuala Lumpur, Malaysia": {"Petronas Twin Towers", "KL Tower", "Batu Caves", "Central Market"},
         "Pattaya": {"The Sanctuary of Truth", "Pattaya Floating Market", "Big Buddha Temple", "Nong Nooch Tropical Garden"},
         "Bangkok": {"The Grand Palace", "Wat Pho", "Wat Arun", "Chatuchak Weekend Market"},
+        "Paris": {"Eiffel Tower", "Louvre Museum", "Notre-Dame Cathedral"},
+        "New York": {"Statue of Liberty", "Times Square", "Central Park"},
         "Tokyo": {"Sensō-ji", "Tokyo Tower", "Shibuya Scramble Crossing", "Meiji Shrine"},
         "London": {"British Museum", "Tower of London", "Buckingham Palace", "London Eye"},
         "Shanghai": {"The Bund", "Oriental Pearl Tower", "Yu Garden", "Shanghai Tower"},

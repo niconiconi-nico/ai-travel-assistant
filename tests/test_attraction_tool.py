@@ -1341,6 +1341,29 @@ def test_get_attractions_by_place_injects_major_city_seeds_when_recall_is_thin(m
     assert {"British Museum", "Tower of London", "Buckingham Palace", "London Eye"}.issubset(names)
 
 
+def test_city_attraction_seeds_cover_100_cities():
+    assert len(attraction_tool.CITY_ATTRACTION_SEEDS) >= 100
+    assert {"bangkok", "beijing", "london", "paris", "new york", "tokyo", "singapore", "sydney"}.issubset(
+        attraction_tool.CITY_ATTRACTION_SEEDS
+    )
+
+
+def test_get_attractions_by_place_uses_seed_fallback_for_new_catalog_free_city(monkeypatch):
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(attraction_tool, "_get_osm_city_pois", lambda place, limit=14: [])
+    monkeypatch.setattr(attraction_tool, "_search_wikipedia_titles", lambda query, limit=8: [])
+    monkeypatch.setattr(
+        attraction_tool,
+        "normalize_recommendations_with_gemini",
+        lambda user_query, city, candidates: candidates,
+    )
+
+    result = attraction_tool.get_attractions_by_place("Paris")
+
+    names = {item["name"] for item in result}
+    assert {"Eiffel Tower", "Louvre Museum", "Notre-Dame Cathedral"}.issubset(names)
+
+
 def test_get_attraction_info_extracts_and_normalizes_visit_duration(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "fake-key")
     monkeypatch.setattr(attraction_tool, "_search_osm_poi_by_name", lambda *args, **kwargs: {})

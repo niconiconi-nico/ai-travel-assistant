@@ -240,6 +240,7 @@ SERPAPI_API_KEY=your_serpapi_key
 
 ### 2) 工具位置与能力
 - 文件：`app/tools/attraction_tool.py`
+- 本地兜底资料：`app/data/city_attraction_seeds.json`（100 个城市的 iconic attraction seeds）
 - 核心函数：`get_attraction_info(attraction_name: str, location: str | None = None) -> dict`
 - 返回字段：
   - `name`

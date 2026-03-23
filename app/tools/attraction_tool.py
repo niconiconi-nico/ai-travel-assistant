@@ -14,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from serpapi import GoogleSearch
 
 _CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "attraction_cache.json"
+_CITY_ATTRACTION_SEEDS_PATH = Path(__file__).resolve().parents[1] / "data" / "city_attraction_seeds.json"
 _CACHE_LOCK = threading.Lock()
 
 _EXACT_PRICE_PATTERNS = [
@@ -118,74 +119,24 @@ _ATTRACTION_ALIAS_OVERRIDES: dict[str, list[str]] = {
     "sanctuary of truth": ["the sanctuary of truth"],
 }
 
-CITY_ATTRACTION_SEEDS: dict[str, list[str]] = {
-    "bangkok": [
-        "The Grand Palace",
-        "Wat Pho",
-        "Wat Arun",
-        "Chatuchak Weekend Market",
-        "Jim Thompson House Museum",
-    ],
-    "beijing": [
-        "Forbidden City",
-        "Temple of Heaven",
-        "Summer Palace",
-        "Mutianyu Great Wall",
-        "Tiananmen Square",
-        "Beihai Park",
-        "Lama Temple",
-    ],
-    "george town": [
-        "Chew Jetty",
-        "Armenian Street",
-        "Khoo Kongsi",
-        "Penang Street Art",
-        "Pinang Peranakan Mansion",
-    ],
-    "kuala lumpur": [
-        "Petronas Twin Towers",
-        "Batu Caves",
-        "KL Tower",
-        "Central Market",
-        "Merdeka Square",
-        "Bukit Bintang",
-    ],
-    "london": [
-        "British Museum",
-        "Tower of London",
-        "Buckingham Palace",
-        "London Eye",
-        "Big Ben",
-    ],
-    "pattaya": [
-        "The Sanctuary of Truth",
-        "Pattaya Floating Market",
-        "Big Buddha Temple",
-        "Nong Nooch Tropical Garden",
-        "Art in Paradise Pattaya",
-    ],
-    "penang": [
-        "Penang Hill",
-        "Chew Jetty",
-        "Kek Lok Si Temple",
-        "Armenian Street",
-        "Penang Street Art",
-    ],
-    "shanghai": [
-        "The Bund",
-        "Oriental Pearl Tower",
-        "Yu Garden",
-        "Shanghai Tower",
-        "Shanghai Museum",
-    ],
-    "tokyo": [
-        "Sensō-ji",
-        "Tokyo Tower",
-        "Shibuya Scramble Crossing",
-        "Meiji Shrine",
-        "Tokyo Skytree",
-    ],
-}
+def _load_city_attraction_seeds() -> dict[str, list[str]]:
+    try:
+        payload = json.loads(_CITY_ATTRACTION_SEEDS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+    normalized: dict[str, list[str]] = {}
+    for city, attractions in payload.items():
+        city_key = _normalize_text(city).lower()
+        if not city_key or not isinstance(attractions, list):
+            continue
+        cleaned_attractions = [_normalize_text(item) for item in attractions if _normalize_text(item)]
+        if cleaned_attractions:
+            normalized[city_key] = cleaned_attractions
+    return normalized
+
+
+CITY_ATTRACTION_SEEDS: dict[str, list[str]] = _load_city_attraction_seeds()
 
 _CITY_ICONIC_ATTRACTIONS: dict[str, list[str]] = {}
 
